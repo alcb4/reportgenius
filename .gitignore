@@ -21,6 +21,9 @@ dist/
 build/
 *.tsbuildinfo
 
+# ── Internal local docs / prompts ───────────────────────────────────────────
+/docs/
+
 # ── OS / Editor ──────────────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
