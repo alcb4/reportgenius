@@ -1,0 +1,27 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(docker compose:*)",
+      "Bash(npm install:*)",
+      "Bash(until docker:*)",
+      "Bash(do sleep:*)",
+      "Bash(done)",
+      "Bash(npx prisma:*)",
+      "Bash(docker exec:*)",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); vulns=d.get\\(''''vulnerabilities'''',{}\\); [print\\(k, v[''''severity'''']\\) for k,v in vulns.items\\(\\) if v[''''severity''''] in \\(''''high'''',''''critical''''\\)]\")",
+      "Bash(npx tsc:*)",
+      "Bash(DATABASE_URL=\"postgresql://postgres:password@localhost:5433/reportgenius\" npx prisma generate 2>&1)",
+      "Bash(DATABASE_URL=\"postgresql://postgres:password@localhost:5433/reportgenius\" npx prisma generate --schema=prisma/schema.prisma 2>&1)",
+      "Bash(DATABASE_URL=\"postgresql://postgres:password@localhost:5433/reportgenius\" node_modules/.bin/prisma generate --schema=prisma/schema.prisma)",
+      "Bash(DATABASE_URL=\"postgresql://postgres:password@localhost:5433/reportgenius\" ../node_modules/.bin/prisma generate --schema=../prisma/schema.prisma)",
+      "Bash(node_modules/.bin/prisma generate:*)",
+      "Bash(curl -s -X POST http://localhost:3001/api/v1/auth/register -H \"Content-Type: application/json\" -d '{\"\"\"\"email\"\"\"\":\"\"\"\"teacher@test.com\"\"\"\",\"\"\"\"password\"\"\"\":\"\"\"\"password123\"\"\"\",\"\"\"\"orgName\"\"\"\":\"\"\"\"Test School\"\"\"\"}')",
+      "Bash(python3 -m json.tool)",
+      "Bash(TOKEN=\"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySWQiOiIzMzE0MTlmYS1mYjAwLTRlMTItYWI5Yi02YTAyZmZhZGUzNDMiLCJvcmdhbml6YXRpb25JZCI6IjE5YjdmZmFmLTAzMjYtNDBiNy04MzZkLTE5Nzk2Y2NhYTQ0ZCIsImVtYWlsIjoibmV3dGVhY2hlckB0ZXN0LmNvbSIsImlhdCI6MTc3NDQ3Mzk2NywiZXhwIjoxNzc1MDc4NzY3fQ.k1ORoUhrEUwzlxgshgYYbgs0cJIZBKpngUJefz2ofag\" __NEW_LINE_76c21124f27f1dcd__ echo \"=== GET /api/v1/classes \\(after create\\) ===\" curl -s http://localhost:3001/api/v1/classes -H \"Authorization: Bearer $TOKEN\")",
+      "Bash(python3 -m json.tool __NEW_LINE_76c21124f27f1dcd__ echo \"\" echo \"=== Verify tenant isolation: unauthenticated request ===\" curl -s http://localhost:3001/api/v1/classes)",
+      "Bash(pkill -f \"ts-node.*src/server.ts\")",
+      "Bash(lsof -ti:3001)",
+      "Bash(xargs kill:*)"
+    ]
+  }
+}

@@ -1,0 +1,52 @@
+# ── Environment / secrets ──────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ── Dependencies ────────────────────────────────────────────────────────────
+node_modules/
+.pnp
+.pnp.js
+
+# ── Next.js ─────────────────────────────────────────────────────────────────
+frontend/.next/
+frontend/out/
+frontend/.vercel/
+
+# ── Prisma ──────────────────────────────────────────────────────────────────
+prisma/migrations/dev/
+
+# ── Build artefacts ─────────────────────────────────────────────────────────
+dist/
+build/
+*.tsbuildinfo
+
+# ── OS / Editor ──────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ── Logs ────────────────────────────────────────────────────────────────────
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ── Test coverage ────────────────────────────────────────────────────────────
+coverage/
+.nyc_output/
+.env
+.env.local
+.env.production
+.env*.local
+node_modules/
+.next/
+dist/
+build/
+*.log
+.DS_Store
+backend/.env
+prisma/migrations/

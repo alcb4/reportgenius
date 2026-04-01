@@ -1,0 +1,259 @@
+// Prisma Schema — ReportGenius v1
+// Every domain table carries organization_id for multi-tenant isolation.
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../frontend/node_modules/.prisma/client"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+model Organization {
+  id         String    @id @default(uuid()) @db.Uuid
+  name       String    @db.VarChar(255)
+  settings   Json      @default("{}") @db.JsonB
+  created_at DateTime  @default(now())
+  deleted_at DateTime?
+
+  users        User[]
+  classes      Class[]
+  students     Student[]
+  reports      Report[]
+  sessions     ReportSession[]
+  topicRatings TopicRating[]
+
+  @@map("organizations")
+}
+
+model Test {
+  id               String         @id @default(uuid()) @db.Uuid
+  class_id         String         @db.Uuid
+  session_id       String?        @db.Uuid
+  name             String         @db.VarChar(255)
+  topics           String[]
+  max_mark         Int
+  grade_boundaries Json           @default("{}") @db.JsonB
+  created_at       DateTime       @default(now())
+
+  class            Class          @relation(fields: [class_id], references: [id], onDelete: Cascade)
+  session          ReportSession? @relation(fields: [session_id], references: [id], onDelete: SetNull)
+  results          TestResult[]
+
+  @@index([class_id])
+  @@index([session_id])
+  @@map("tests")
+}
+
+model TestResult {
+  id         String  @id @default(uuid()) @db.Uuid
+  test_id    String  @db.Uuid
+  student_id String  @db.Uuid
+  score      Int
+  comment    String? @db.Text
+  calculated Json    @default("{}") @db.JsonB
+
+  test       Test    @relation(fields: [test_id], references: [id], onDelete: Cascade)
+  student    Student @relation(fields: [student_id], references: [id], onDelete: Cascade)
+
+  @@unique([test_id, student_id])
+  @@index([test_id])
+  @@index([student_id])
+  @@map("test_results")
+}
+
+model User {
+  id                String       @id @default(uuid()) @db.Uuid
+  email             String       @unique @db.VarChar(255)
+  password_hash     String       @db.VarChar(255)
+  organization_id   String       @db.Uuid
+  created_at        DateTime     @default(now())
+  terms_accepted_at DateTime?
+
+  organization    Organization @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+
+  @@index([organization_id])
+  @@map("users")
+}
+
+// Class is now permanent (year group + students only).
+// Report events are modelled as ReportSession, not on Class.
+model Class {
+  id              String   @id @default(uuid()) @db.Uuid
+  organization_id String   @db.Uuid
+  name            String   @db.VarChar(255)
+  year_group      String?  @db.VarChar(100)
+  subject         String?  @db.VarChar(100)
+  archived        Boolean  @default(false)
+  created_at      DateTime @default(now())
+  updated_at      DateTime @updatedAt
+
+  organization Organization    @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  students     Student[]
+  sessions     ReportSession[]
+  tests        Test[]
+
+  @@index([organization_id])
+  @@map("classes")
+}
+
+model Student {
+  id              String   @id @default(uuid()) @db.Uuid
+  organization_id String   @db.Uuid
+  class_id        String   @db.Uuid
+  first_name      String   @db.VarChar(100)
+  last_name       String?  @db.VarChar(100)
+  student_ref_id  String?  @db.VarChar(100)
+  // anonymous_token is sent to the LLM instead of any PII identifier.
+  anonymous_token String   @unique @default(uuid()) @db.Uuid
+  gender          String?  @db.VarChar(20)
+  // internal_notes is NEVER sent to the LLM.
+  internal_notes  String?  @db.Text
+  created_at      DateTime @default(now())
+  updated_at      DateTime @updatedAt
+
+  organization Organization @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  class        Class        @relation(fields: [class_id], references: [id], onDelete: Cascade)
+  ratings      Rating[]
+  reports      Report[]
+  topicRatings TopicRating[]
+  testResults  TestResult[]
+
+  @@index([organization_id])
+  @@index([class_id])
+  @@map("students")
+}
+
+// Global discipline template library — seeded, org-neutral.
+model DisciplineTemplate {
+  id         String  @id @default(uuid()) @db.Uuid
+  category   String  @db.VarChar(100)
+  name       String  @db.VarChar(100)
+  is_default Boolean @default(false)
+
+  @@map("discipline_templates")
+}
+
+// Named report event attached to a class.
+model ReportSession {
+  id                 String   @id @default(uuid()) @db.Uuid
+  organization_id    String   @db.Uuid
+  class_id           String   @db.Uuid
+  name               String   @db.VarChar(255)
+  topics_covered     String[]
+  tone               String   @default("balanced") @db.VarChar(50)
+  length             String   @default("medium") @db.VarChar(20)
+  // status: draft | in_progress | complete
+  status             String   @default("draft") @db.VarChar(20)
+  // Template support: mark a session as a reusable template
+  is_template        Boolean  @default(false)
+  // Points back to the session this was copied from, if any
+  source_template_id String?  @db.Uuid
+  // Filter state persisted per session — used as defaults for report generation.
+  // test_filters: { [testId]: { includeMark: bool, includePercentage: bool, includeGrade: bool, includeLowMention: bool } }
+  test_filters            Json?    @db.JsonB
+  // progression_filters: list of discipline names included in progression context
+  progression_filters     String[]
+  // enable_progression: master toggle for progression mentions in reports
+  enable_progression      Boolean  @default(true)
+  // allow_negative_progression: whether declined scores are mentioned
+  allow_negative_progression Boolean @default(true)
+  // class_overview: teacher-written context injected into all reports for this session
+  class_overview          String?  @db.Text
+  created_at              DateTime @default(now())
+  updated_at              DateTime @updatedAt
+
+  organization Organization        @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  class        Class               @relation(fields: [class_id], references: [id], onDelete: Cascade)
+  disciplines  SessionDiscipline[]
+  reports      Report[]
+  topicRatings TopicRating[]
+  tests        Test[]
+
+  @@index([organization_id])
+  @@index([class_id])
+  @@map("report_sessions")
+}
+
+// Disciplines chosen for a specific ReportSession (from the template library or custom).
+model SessionDiscipline {
+  id         String   @id @default(uuid()) @db.Uuid
+  session_id String   @db.Uuid
+  name       String   @db.VarChar(100)
+  category   String?  @db.VarChar(100)
+  is_custom  Boolean  @default(false)
+  created_at DateTime @default(now())
+
+  session ReportSession @relation(fields: [session_id], references: [id], onDelete: Cascade)
+  ratings Rating[]
+
+  @@index([session_id])
+  @@map("session_disciplines")
+}
+
+model Rating {
+  id                    String   @id @default(uuid()) @db.Uuid
+  student_id            String   @db.Uuid
+  session_discipline_id String   @db.Uuid
+  score                 Int
+  comment               String?  @db.Text
+  created_at            DateTime @default(now())
+
+  student            Student           @relation(fields: [student_id], references: [id], onDelete: Cascade)
+  session_discipline SessionDiscipline @relation(fields: [session_discipline_id], references: [id], onDelete: Cascade)
+
+  @@index([student_id, session_discipline_id])
+  @@map("ratings")
+}
+
+model Report {
+  id               String   @id @default(uuid()) @db.Uuid
+  organization_id  String   @db.Uuid
+  student_id       String   @db.Uuid
+  session_id       String   @db.Uuid
+  // anonymous_token copied from student at generation time — never PII.
+  anonymous_token  String   @db.Uuid
+  llm_model        String?  @db.VarChar(100)
+  llm_prompt       String?  @db.Text
+  llm_raw_response String?  @db.Text
+  edited_content   String   @db.Text
+  status              String    @default("draft") @db.VarChar(20)
+  word_count          Int?
+  // Set to now() whenever a rating/topic-rating is saved after report generation.
+  // Null means ratings are in sync with the report. Cleared on re-generation.
+  ratings_changed_at  DateTime?
+  created_at          DateTime  @default(now())
+  updated_at          DateTime  @updatedAt
+
+  organization Organization  @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  student      Student       @relation(fields: [student_id], references: [id], onDelete: Cascade)
+  session      ReportSession @relation(fields: [session_id], references: [id])
+
+  @@unique([session_id, student_id])
+  @@index([organization_id, student_id])
+  @@index([session_id])
+  @@map("reports")
+}
+
+model TopicRating {
+  id              String        @id @default(uuid()) @db.Uuid
+  organization_id String        @db.Uuid
+  session_id      String        @db.Uuid
+  student_id      String        @db.Uuid
+  topic_name      String        @db.VarChar(255)
+  score           Int
+  created_at      DateTime      @default(now())
+  updated_at      DateTime      @updatedAt
+
+  organization    Organization  @relation(fields: [organization_id], references: [id], onDelete: Cascade)
+  session         ReportSession @relation(fields: [session_id], references: [id], onDelete: Cascade)
+  student         Student       @relation(fields: [student_id], references: [id], onDelete: Cascade)
+
+  @@unique([session_id, student_id, topic_name])
+  @@index([organization_id])
+  @@index([session_id, student_id])
+  @@map("topic_ratings")
+}

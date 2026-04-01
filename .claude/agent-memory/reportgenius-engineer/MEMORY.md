@@ -1,0 +1,28 @@
+# ReportGenius Engineer Memory Index
+
+- [Task 1 — Database Foundation complete](project_task1_complete.md) — Schema, Docker, seed complete; discipline org_id via class join; deterministic UUID seed pattern
+- [ts-node shell quoting issue on Linux](feedback_tsnode_quoting.md) — Use --project tsconfig flag, never --compiler-options with inline JSON
+- [Task 2 — Express Auth + Core CRUD complete](project_task2_complete.md) — JWT auth, classes CRUD, Prisma transactions; copy .prisma/client to backend after generate
+- [Prisma client generation for backend subdirectory](feedback_prisma_backend_setup.md) — Must copy root .prisma/client into backend/node_modules/.prisma/client after every prisma generate
+- [Task 3 — Students/Disciplines/Ratings CRUD complete](project_task3_complete.md) — Upsert via Map+transaction, req.params String() cast, mixed prefix router mounting at /api/v1
+- [Task 4 — LLM Adapter + Single Report Generation complete](project_task4_complete.md) — OpenAI+Claude adapters, factory with fallback chain, privacy-safe prompt-builder, report service, 5 report routes
+- [Task 5 — BullMQ Bulk Generation complete](project_task5_complete.md) — Queue+worker+bulk-service+3 routes; Redis hash tracks batch; orgId isolation verified; retry-failed working
+- [BullMQ custom jobId colon restriction](feedback_bullmq_jobid.md) — BullMQ rejects ":" in custom jobId; use "_" as separator for composite IDs
+- [Task 6 — PDF/ZIP/XLSX Exports complete](project_task6_complete.md) — Puppeteer+chromium PDF, archiver ZIP, xlsx XLSX; headless:"shell", sequential PDF gen, SLUG_MAP for discipline scores
+- [Task 7 — Next.js Frontend Shell complete](project_task7_complete.md) — Next.js 16.2.1 app, auth context, dashboard, class creation, settings; lazy-init pattern for localStorage; AES-256-GCM key encryption in backend
+- [Schema Refactor — Sessions, Disciplines, Student PII (pre-Task 8)](project_schema_refactor_sessions.md) — ReportSession, DisciplineTemplate, SessionDiscipline, anonymous_token; all routes now session-scoped
+- [Pre-Task 8 UI Foundations](project_pre_task8_ui.md) — Class detail, session detail, dashboard pages; PUT /students/:studentId added; new-class page fixed to match API
+- [Task 8 — Ratings Grid + Bulk Generation UI complete](project_task8_ratings_grid.md) — RatingsGrid component with score buttons, auto-save, keyboard nav, sparkline, bulk/single generate, polling toast
+- [Task 8.2 — Dual Rating Mode](project_task8_dual_rating_mode.md) — SparklineGrid music-staff SVG; table hidden via display:none; containerRefs for coords; dragActivatedRef suppresses post-drag click
+- [Next.js 16 strict React ESLint rules](feedback_eslint_react_rules.md) — Three rules: no ref mutation during render, no setState at effect top-level, no useCallback self-reference
+- [Task 9 — Report Editor Review Page](project_task9.md) — Focused student cycling view: backend PUT/GET/PATCH extensions, session tab UI, review page
+- [Topic Ratings Part 1 — Backend](project_topic_ratings_part1.md) — TopicRating model, bulk upsert API, scored prompt section, report service integration, topic mutation safety + rename
+- [Topic Ratings Part 2 — Frontend Grid](project_topic_ratings_part2.md) — Two-row grouped header, topic score cells, auto-save, SparklineGrid topic staff + buttons, w-full grid layout
+- [Parse-reports DB save fix + Report unique constraint](project_parse_reports_fix.md) — Added @@unique([session_id, student_id]) to Report; changed create→upsert with full logging
+- [Test Score Entry Page](project_test_entry_page.md) — Added GET /:classId/tests/:testId backend endpoint + full test entry frontend page at /classes/[id]/tests/[testId]/entry
+- [Historical Progression + ReportStudio](project_progression_and_studio.md) — progression-data endpoint, ProgressionItem in prompt, regenerate endpoint, ReportStudio component, session page wiring
+- [UI Realignment — Filter Panel + Tone Consistency](project_ui_realignment.md) — Filters in Ratings tab, gentle/balanced/direct tone vocab, class_overview/test_filters/progression_filters schema, Studio removed
+- [Compact Filter Bar + Session-Scoped Tests](project_compact_filter_bar.md) — CompactFilterBar replaces FilterPanel; session_id on Test; enable/allow_negative_progression on ReportSession; 3-col expansion panel
+- [Filter Bar Final Polish](project_filter_bar_polish.md) — Full-width tone/disciplines, hover hints, class-test selectable rows, always-visible overview textarea, progression seed data
+- [Filter Bar Final Polish 2.0](project_filter_bar_polish2.md) — SelectTestsModal replaces inline rows; progression hides scores shows checkboxes only; tone h-10 buttons; disciplines flex-wrap pills
+- [CompactFilterBar extracted + added to review page](project_compactfilterbar_extracted.md) — Moved to components/CompactFilterBar.tsx; wired into review/page.tsx with classTests+progressionData fetch, handleFilterSave, filtersChangedSinceGenerate pulse signal
