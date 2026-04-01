@@ -1,0 +1,328 @@
+import { prisma } from '@/lib/prisma'
+import { Prisma } from '@prisma/client'
+import { createLLMAdapter } from '@/lib/adapters/llm/factory'
+import { formatRatingSummary, buildPrompt } from '@/lib/adapters/llm/prompt-builder'
+import { ReportLength, ProgressionItem, TestContextItem } from '@/lib/adapters/llm/types'
+import { decryptApiKey } from '@/lib/encryption'
+
+export interface GenerateReportOptions {
+  tone: string
+  length: ReportLength
+  llmProvider?: string
+  progression?: ProgressionItem[]
+}
+
+export interface GeneratedReport {
+  id: string
+  organization_id: string
+  student_id: string
+  session_id: string
+  anonymous_token: string
+  llm_model: string | null
+  llm_prompt: string | null
+  llm_raw_response: string | null
+  edited_content: string
+  status: string
+  word_count: number | null
+  created_at: Date
+  updated_at: Date
+}
+
+function countWords(text: string): number {
+  return text.trim().split(/\s+/).filter(Boolean).length
+}
+
+function sanitiseLlmResponse(raw: string): string {
+  const lines = raw.split('\n')
+  const firstLine = lines[0].trim()
+
+  const isTitleLine =
+    /^(\*{1,2})?student report[:\s]/i.test(firstLine) ||
+    /^#{1,3}\s/.test(firstLine)
+
+  if (isTitleLine) {
+    let rest = lines.slice(1)
+    while (rest.length > 0 && rest[0].trim() === '') {
+      rest = rest.slice(1)
+    }
+    return rest.join('\n').trim()
+  }
+
+  return raw.trim()
+}
+
+async function resolveOrgLlmSettings(orgId: string): Promise<{ provider: string; apiKey: string; model: string }> {
+  const org = await prisma.organization.findUnique({
+    where: { id: orgId },
+    select: { settings: true },
+  })
+
+  const settings = (org?.settings ?? {}) as Record<string, unknown>
+  const provider = (settings.llm_provider as string) ?? process.env.LLM_PROVIDER ?? 'openai'
+  const model = (settings.model as string) ?? process.env.OPENAI_MODEL ?? 'gpt-4o-mini'
+  const encryptedKey = settings.encrypted_api_key as string | undefined
+
+  let apiKey: string
+  if (provider === 'ollama') {
+    apiKey = (settings.ollama_url as string) ?? process.env.OLLAMA_URL ?? 'http://localhost:11434'
+  } else if (encryptedKey) {
+    apiKey = decryptApiKey(encryptedKey)
+  } else {
+    // Fall back to env vars for local dev without DB settings configured
+    apiKey =
+      provider === 'claude'
+        ? (process.env.CLAUDE_API_KEY ?? '')
+        : (process.env.OPENAI_API_KEY ?? '')
+  }
+
+  if (provider !== 'ollama' && !apiKey) {
+    throw Object.assign(
+      new Error(`No API key configured for provider "${provider}". Add one in Settings.`),
+      { code: 'LLM_NO_API_KEY', statusCode: 500 }
+    )
+  }
+
+  return { provider, apiKey, model }
+}
+
+export async function generateSingleReport(
+  studentId: string,
+  sessionId: string,
+  orgId: string,
+  options: GenerateReportOptions
+): Promise<GeneratedReport> {
+  const { tone, length, progression: optionsProgression } = options
+
+  const { provider, apiKey, model: orgModel } = await resolveOrgLlmSettings(orgId)
+
+  const [session, student] = await Promise.all([
+    prisma.reportSession.findFirst({
+      where: { id: sessionId, organization_id: orgId },
+      select: {
+        id: true,
+        class_id: true,
+        topics_covered: true,
+        tone: true,
+        length: true,
+        test_filters: true,
+        disciplines: {
+          select: { id: true, name: true },
+          orderBy: { created_at: 'asc' },
+        },
+        tests: {
+          select: { id: true, name: true },
+        },
+      },
+    }),
+    prisma.student.findFirst({
+      where: { id: studentId, organization_id: orgId },
+      select: {
+        id: true,
+        first_name: true,
+        gender: true,
+        anonymous_token: true,
+      },
+    }),
+  ])
+
+  if (!session) {
+    throw Object.assign(
+      new Error('Session not found or does not belong to this organization'),
+      { code: 'SESSION_NOT_FOUND', statusCode: 404 }
+    )
+  }
+
+  if (!student) {
+    throw Object.assign(
+      new Error('Student not found or does not belong to this organization'),
+      { code: 'STUDENT_NOT_FOUND', statusCode: 404 }
+    )
+  }
+
+  const disciplineIds = session.disciplines.map((d) => d.id)
+
+  const ratings = await prisma.rating.findMany({
+    where: {
+      student_id: studentId,
+      session_discipline_id: { in: disciplineIds },
+    },
+    select: {
+      score: true,
+      comment: true,
+      session_discipline: {
+        select: { name: true },
+      },
+    },
+    orderBy: { session_discipline: { name: 'asc' } },
+  })
+
+  if (ratings.length === 0) {
+    throw Object.assign(
+      new Error('Student has no ratings for this session — add ratings before generating a report'),
+      { code: 'NO_RATINGS', statusCode: 422 }
+    )
+  }
+
+  const ratingSummary = formatRatingSummary(
+    ratings.map((r) => ({
+      disciplineName: r.session_discipline.name,
+      score: r.score,
+      comment: r.comment,
+    }))
+  )
+
+  const topicRatingRows = await prisma.topicRating.findMany({
+    where: {
+      session_id: sessionId,
+      student_id: studentId,
+      organization_id: orgId,
+    },
+    select: { topic_name: true, score: true },
+    orderBy: { topic_name: 'asc' },
+  })
+
+  const topicRatings =
+    topicRatingRows.length > 0
+      ? topicRatingRows.map((tr) => ({
+          topicName: tr.topic_name,
+          score: tr.score,
+        }))
+      : undefined
+
+  const testFilters = (session.test_filters ?? {}) as Record<string, {
+    includeMark: boolean
+    includePercentage: boolean
+    includeGrade: boolean
+    includeLowMention: boolean
+  }>
+
+  const relevantTestIds = (session.tests ?? [])
+    .filter((t) => {
+      const f = testFilters[t.id]
+      return f && (f.includePercentage || f.includeGrade || f.includeLowMention)
+    })
+    .map((t) => t.id)
+
+  let testContext: TestContextItem[] | undefined
+
+  if (relevantTestIds.length > 0) {
+    const testResults = await prisma.testResult.findMany({
+      where: { test_id: { in: relevantTestIds }, student_id: studentId },
+      select: { test_id: true, calculated: true },
+    })
+    const resultByTestId = new Map(testResults.map((r) => [r.test_id, r]))
+    const items: TestContextItem[] = []
+    for (const test of session.tests ?? []) {
+      const filter = testFilters[test.id]
+      if (!filter) continue
+      const result = resultByTestId.get(test.id)
+      if (!result) continue
+      const calc = result.calculated as { percentage: number; grade: string | null }
+      const item: TestContextItem = { testName: test.name }
+      if (filter.includePercentage) item.percentage = calc.percentage
+      if (filter.includeGrade) item.grade = calc.grade
+      if (filter.includeLowMention) item.lowMention = true
+      items.push(item)
+    }
+    if (items.length > 0) testContext = items
+  }
+
+  const effectiveTone = tone || session.tone
+  const effectiveLength = length || (session.length as ReportLength)
+
+  let resolvedProgression: ProgressionItem[] | undefined = optionsProgression
+
+  if (resolvedProgression === undefined) {
+    const prevSession = await prisma.reportSession.findFirst({
+      where: {
+        class_id: session.class_id,
+        organization_id: orgId,
+        status: 'complete',
+        id: { not: sessionId },
+      },
+      select: {
+        disciplines: { select: { id: true, name: true } },
+      },
+      orderBy: { updated_at: 'desc' },
+    })
+
+    if (prevSession) {
+      const prevDisciplineIds = prevSession.disciplines.map((d) => d.id)
+
+      const prevRatings = await prisma.rating.findMany({
+        where: {
+          student_id: studentId,
+          session_discipline_id: { in: prevDisciplineIds },
+        },
+        select: {
+          score: true,
+          session_discipline: { select: { name: true } },
+        },
+      })
+
+      const previousScoreByName = new Map<string, number>()
+      for (const r of prevRatings) {
+        previousScoreByName.set(r.session_discipline.name, r.score)
+      }
+
+      const currentScoreByName = new Map<string, number>()
+      for (const r of ratings) {
+        currentScoreByName.set(r.session_discipline.name, r.score)
+      }
+
+      const matched: ProgressionItem[] = []
+      for (const [name, currentScore] of currentScoreByName) {
+        const previousScore = previousScoreByName.get(name)
+        if (previousScore === undefined) continue
+        const trend: ProgressionItem['trend'] =
+          currentScore > previousScore
+            ? 'improved'
+            : currentScore < previousScore
+            ? 'declined'
+            : 'maintained'
+        matched.push({ name, trend, previous: previousScore, current: currentScore })
+      }
+
+      if (matched.length > 0) {
+        resolvedProgression = matched
+      }
+    }
+  }
+
+  const reportPrompt = {
+    firstName: student.first_name,
+    gender: student.gender ?? 'unspecified',
+    ratingSummary,
+    topics: session.topics_covered,
+    tone: effectiveTone,
+    length: effectiveLength,
+    topicRatings,
+    progression: resolvedProgression,
+    testContext,
+  }
+
+  const promptText = buildPrompt(reportPrompt)
+
+  const adapter = createLLMAdapter(provider, apiKey)
+
+  const rawResponse = await adapter.generateReport(reportPrompt)
+  const cleanedResponse = sanitiseLlmResponse(rawResponse)
+  const words = countWords(cleanedResponse)
+
+  const saved = await prisma.report.create({
+    data: {
+      organization_id: orgId,
+      student_id: studentId,
+      session_id: sessionId,
+      anonymous_token: student.anonymous_token,
+      llm_model: orgModel,
+      llm_prompt: promptText,
+      llm_raw_response: rawResponse,
+      edited_content: cleanedResponse,
+      status: 'draft',
+      word_count: words,
+    } satisfies Prisma.ReportUncheckedCreateInput,
+  })
+
+  return saved
+}
