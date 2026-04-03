@@ -4,23 +4,22 @@
  * generateSingleReport():
  *   1. Fetch student + their ratings for this session's disciplines + session topics
  *      in one Prisma query (no N+1).
- *   2. Format the privacy-safe rating summary.
- *   3. Build the LLM prompt (only first_name, gender, ratingSummary, topics_covered).
- *      The student's anonymous_token is stored on the report — never PII in the prompt.
- *   4. Call the LLM adapter.
- *   5. Persist the new Report row: session_id, anonymous_token, llm_prompt,
+ *   2. Build the LLM prompt (only first_name, gender, raw ratings, topics_covered,
+ *      testContext, testInstruction, progression). No PII in the prompt.
+ *   3. Call the LLM adapter.
+ *   4. Persist the new Report row: session_id, anonymous_token, llm_prompt,
  *      llm_raw_response, edited_content (copy of raw), status=draft, word_count.
- *   6. Return the saved report.
+ *   5. Return the saved report.
  *
  * Multi-tenant isolation: every query filters by organizationId.
- * Privacy: LLM prompt contains ONLY first_name, gender, ratings summary, topics.
+ * Privacy: LLM prompt contains ONLY first_name, gender, ratings, topics.
  *   last_name, student_ref_id, internal_notes are NEVER included.
  */
 
 import { PrismaClient, Prisma } from "@prisma/client";
 import { createLLMAdapter } from "../adapters/llm/factory";
-import { formatRatingSummary, buildPrompt } from "../adapters/llm/prompt-builder";
-import { ReportLength, ProgressionItem, TestContextItem } from "../adapters/llm/types";
+import { buildPrompt, resolveTestInstructionFromConfig } from "../adapters/llm/prompt-builder";
+import { ReportLength, RawRating, ProgressionItem, TestContextItem } from "../adapters/llm/types";
 import { config } from "../config";
 
 const prisma = new PrismaClient();
@@ -118,9 +117,6 @@ export async function generateSingleReport(
           select: { id: true, name: true },
           orderBy: { created_at: "asc" },
         },
-        tests: {
-          select: { id: true, name: true },
-        },
       },
     }),
     prisma.student.findFirst({
@@ -175,14 +171,12 @@ export async function generateSingleReport(
     );
   }
 
-  // ── 2. Format privacy-safe rating summary ──────────────────────────────────
-  const ratingSummary = formatRatingSummary(
-    ratings.map((r) => ({
-      disciplineName: r.session_discipline.name,
-      score: r.score,
-      comment: r.comment,
-    }))
-  );
+  // ── 2. Build raw ratings array ─────────────────────────────────────────────
+  const rawRatings: RawRating[] = ratings.map((r) => ({
+    name: r.session_discipline.name,
+    score: r.score,
+    comment: r.comment,
+  }));
 
   // Fetch topic ratings for this student in this session (score per topic).
   // These are score-only — no PII. Passed to buildPrompt only if present.
@@ -205,45 +199,74 @@ export async function generateSingleReport(
       : undefined;
 
   // ── 2c. Fetch test context ──────────────────────────────────────────────────
-  // Only included when test_filters has at least one flag enabled for a test.
+  // testInstruction is derived from config — fires based on what the teacher
+  // configured, not on whether students happen to have results yet (Rule 6).
+  // testContext is per-student score data shown in the student block.
   const testFilters = (session.test_filters ?? {}) as Record<string, {
-    includeMark: boolean;
-    includePercentage: boolean;
-    includeGrade: boolean;
-    includeLowMention: boolean;
+    includeMark?: boolean;
+    includePercentage?: boolean;
+    includeGrade?: boolean;
+    includeLowMention?: boolean;
   }>;
-  const relevantTestIds = (session.tests ?? [])
+
+  // Derive included test IDs from test_filters keys (tests may be class-level with no session_id,
+  // so we query by ID directly rather than relying on the session→tests Prisma relation).
+  const configuredTestIds = Object.keys(testFilters);
+  const allIncludedTests = configuredTestIds.length > 0
+    ? await prisma.test.findMany({
+        where: { id: { in: configuredTestIds }, class_id: session.class_id },
+        select: { id: true, name: true, max_mark: true },
+      })
+    : [];
+
+  // Rule 6 instruction derived from config — fires regardless of whether results exist yet
+  const testInstruction = resolveTestInstructionFromConfig(
+    testFilters,
+    allIncludedTests.map((t) => t.id)
+  );
+
+  // Tests that need score data fetched (have at least one score flag set)
+  const scoredTestIds = allIncludedTests
     .filter((t) => {
       const f = testFilters[t.id];
-      return f && (f.includePercentage || f.includeGrade || f.includeLowMention);
+      return f && (f.includePercentage || f.includeGrade || f.includeLowMention || f.includeMark);
     })
     .map((t) => t.id);
 
   let testContext: TestContextItem[] | undefined;
-  if (relevantTestIds.length > 0) {
-    const testResults = await prisma.testResult.findMany({
-      where: { test_id: { in: relevantTestIds }, student_id: studentId },
-      select: { test_id: true, calculated: true },
-    });
+
+  if (allIncludedTests.length > 0) {
+    const testResults = scoredTestIds.length > 0
+      ? await prisma.testResult.findMany({
+          where: { test_id: { in: scoredTestIds }, student_id: studentId },
+          select: { test_id: true, score: true, calculated: true },
+        })
+      : [];
     const resultByTestId = new Map(testResults.map((r) => [r.test_id, r]));
     const items: TestContextItem[] = [];
-    for (const test of session.tests ?? []) {
+    for (const test of allIncludedTests) {
       const filter = testFilters[test.id];
-      if (!filter) continue;
-      const result = resultByTestId.get(test.id);
-      if (!result) continue;
-      const calc = result.calculated as { percentage: number; grade: string | null };
-      const item: TestContextItem = { testName: test.name };
-      if (filter.includePercentage) item.percentage = calc.percentage;
-      if (filter.includeGrade) item.grade = calc.grade;
-      if (filter.includeLowMention) item.lowMention = true;
-      items.push(item);
+      const isScored = filter.includePercentage || filter.includeGrade || filter.includeLowMention || filter.includeMark;
+      if (isScored) {
+        const result = resultByTestId.get(test.id);
+        if (!result) continue; // no result yet — skip from block (Rule 6 still fires via testInstruction)
+        const calc = result.calculated as { percentage: number; grade: string | null };
+        const item: TestContextItem = { testName: test.name };
+        if (filter.includePercentage || filter.includeLowMention) item.percentage = calc.percentage;
+        if (filter.includeGrade) item.grade = calc.grade;
+        if (filter.includeLowMention) item.lowMention = true;
+        if (filter.includeMark) item.mark = `${result.score}/${test.max_mark}`;
+        items.push(item);
+      } else {
+        // Qualitative only — always include with just test name; no result needed
+        items.push({ testName: test.name });
+      }
     }
     if (items.length > 0) testContext = items;
   }
 
   // ── 3. Build prompt — only allowed fields ──────────────────────────────────
-  // Privacy rule: first_name + gender + ratingSummary + topics + topicRatings ONLY.
+  // Privacy rule: first_name + gender + rawRatings + topics + topicRatings ONLY.
   const effectiveTone = tone || session.tone;
   const effectiveLength = length || (session.length as ReportLength);
 
@@ -312,13 +335,14 @@ export async function generateSingleReport(
   const reportPrompt = {
     firstName: student.first_name,
     gender: student.gender ?? "unspecified",
-    ratingSummary,
+    ratings: rawRatings,
     topics: session.topics_covered,
     tone: effectiveTone,
     length: effectiveLength,
     topicRatings,
     progression: resolvedProgression,
     testContext,
+    testInstruction,
   };
 
   const promptText = buildPrompt(reportPrompt);

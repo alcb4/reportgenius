@@ -48,8 +48,8 @@ import { z } from "zod";
 import { PrismaClient } from "@prisma/client";
 import { authenticate } from "../middleware/auth";
 import { generateSingleReport } from "../services/report.service";
-import { ReportLength, ProgressionItem, TestContextItem } from "../adapters/llm/types";
-import { formatRatingSummary, buildPrompt } from "../adapters/llm/prompt-builder";
+import { ReportLength, ProgressionItem, TestContextItem, BatchStudentPayload, BatchSessionConfig } from "../adapters/llm/types";
+import { buildPrompt, buildBatchPrompt, resolveTestInstructionFromConfig } from "../adapters/llm/prompt-builder";
 import { createLLMAdapter } from "../adapters/llm/factory";
 import { config } from "../config";
 
@@ -585,9 +585,6 @@ router.get(
             select: { id: true, name: true },
             orderBy: { created_at: "asc" },
           },
-          tests: {
-            select: { id: true, name: true },
-          },
         },
       });
 
@@ -696,26 +693,44 @@ router.get(
 
       // ── Fetch test results for all students ───────────────────────────────────
       const testFilters = (sessionFull.test_filters ?? {}) as Record<string, {
-        includeMark: boolean;
-        includePercentage: boolean;
-        includeGrade: boolean;
-        includeLowMention: boolean;
+        includeMark?: boolean;
+        includePercentage?: boolean;
+        includeGrade?: boolean;
+        includeLowMention?: boolean;
       }>;
-      const relevantTestIds = (sessionFull.tests ?? [])
+
+      // Derive included test IDs from test_filters keys (tests may be class-level with no
+      // session_id, so we query by ID directly rather than relying on the session→tests relation).
+      const batchConfiguredTestIds = Object.keys(testFilters);
+      const allIncludedTests = batchConfiguredTestIds.length > 0
+        ? await prisma.test.findMany({
+            where: { id: { in: batchConfiguredTestIds }, class_id: sessionFull.class_id },
+            select: { id: true, name: true, max_mark: true },
+          })
+        : [];
+
+      // Rule 6 instruction derived from config — fires regardless of whether results exist yet
+      const batchTestInstruction = resolveTestInstructionFromConfig(
+        testFilters,
+        allIncludedTests.map((t) => t.id)
+      );
+
+      // Tests that need score data fetched (have at least one score flag set)
+      const scoredTestIds = allIncludedTests
         .filter((t) => {
           const f = testFilters[t.id];
-          return f && (f.includePercentage || f.includeGrade || f.includeLowMention);
+          return f && (f.includePercentage || f.includeGrade || f.includeLowMention || f.includeMark);
         })
         .map((t) => t.id);
 
-      const testResultsByStudent = new Map<string, Array<{ test_id: string; calculated: unknown }>>();
-      if (relevantTestIds.length > 0) {
+      const testResultsByStudent = new Map<string, Array<{ test_id: string; score: number; calculated: unknown }>>();
+      if (scoredTestIds.length > 0) {
         const allTestResults = await prisma.testResult.findMany({
           where: {
-            test_id: { in: relevantTestIds },
+            test_id: { in: scoredTestIds },
             student_id: { in: studentIds },
           },
-          select: { test_id: true, student_id: true, calculated: true },
+          select: { test_id: true, student_id: true, score: true, calculated: true },
         });
         for (const r of allTestResults) {
           const arr = testResultsByStudent.get(r.student_id) ?? [];
@@ -724,18 +739,16 @@ router.get(
         }
       }
 
-      // ── Build per-student prompts using shared buildPrompt() ──────────────────
-      const studentPrompts = students.map((student) => {
+      // ── Build per-student payloads using shared buildBatchPrompt() ────────────
+      const batchStudents: BatchStudentPayload[] = students.map((student) => {
         const ratings = ratingsByStudent.get(student.id) ?? [];
         const topicRatingRows = topicsByStudent.get(student.id) ?? [];
 
-        const ratingSummary = formatRatingSummary(
-          ratings.map((r) => ({
-            disciplineName: r.session_discipline.name,
-            score: r.score,
-            comment: r.comment,
-          }))
-        );
+        const rawRatings = ratings.map((r) => ({
+          name: r.session_discipline.name,
+          score: r.score,
+          comment: r.comment,
+        }));
 
         const topicRatings =
           topicRatingRows.length > 0
@@ -761,57 +774,50 @@ router.get(
 
         // Compute test context for this student
         let testContext: TestContextItem[] | undefined;
-        if (relevantTestIds.length > 0) {
+        if (allIncludedTests.length > 0) {
           const studentResults = testResultsByStudent.get(student.id) ?? [];
           const resultByTestId = new Map(studentResults.map((r) => [r.test_id, r]));
           const items: TestContextItem[] = [];
-          for (const test of sessionFull.tests ?? []) {
+          for (const test of allIncludedTests) {
             const filter = testFilters[test.id];
-            if (!filter) continue;
-            const result = resultByTestId.get(test.id);
-            if (!result) continue;
-            const calc = result.calculated as { percentage: number; grade: string | null };
-            const item: TestContextItem = { testName: test.name };
-            if (filter.includePercentage) item.percentage = calc.percentage;
-            if (filter.includeGrade) item.grade = calc.grade;
-            if (filter.includeLowMention) item.lowMention = true;
-            items.push(item);
+            const isScored = filter.includePercentage || filter.includeGrade || filter.includeLowMention || filter.includeMark;
+            if (isScored) {
+              const result = resultByTestId.get(test.id);
+              if (!result) continue; // no result yet — skip from block (Rule 6 still fires via testInstruction)
+              const calc = result.calculated as { percentage: number; grade: string | null };
+              const item: TestContextItem = { testName: test.name };
+              if (filter.includePercentage || filter.includeLowMention) item.percentage = calc.percentage;
+              if (filter.includeGrade) item.grade = calc.grade;
+              if (filter.includeLowMention) item.lowMention = true;
+              if (filter.includeMark) item.mark = `${result.score}/${(test as { max_mark?: number }).max_mark ?? "?"}`;
+              items.push(item);
+            } else {
+              // Qualitative only — always include with just test name; no result needed
+              items.push({ testName: test.name });
+            }
           }
           if (items.length > 0) testContext = items;
         }
 
-        return buildPrompt({
+        return {
+          id: student.id,
           firstName: student.first_name,
           gender: student.gender ?? "unspecified",
-          ratingSummary,
+          ratings: rawRatings,
           topics: sessionFull.topics_covered,
-          tone: sessionFull.tone,
-          length: sessionFull.length as ReportLength,
           topicRatings,
           progression,
           testContext,
-        });
+        } satisfies BatchStudentPayload;
       });
 
-      // ── Assemble container prompt with per-student sections ───────────────────
-      const studentSections = students
-        .map((student, i) =>
-          [`=== STUDENT ${student.id} ===`, studentPrompts[i]].join("\n")
-        )
-        .join("\n\n");
+      const batchConfig: BatchSessionConfig = {
+        tone: sessionFull.tone,
+        length: sessionFull.length as ReportLength,
+        testInstruction: batchTestInstruction,
+      };
 
-      const prompt = [
-        `You are a school teacher writing end-of-term report comments.`,
-        `Generate reports for ${students.length} student${students.length !== 1 ? "s" : ""}.`,
-        ``,
-        `CRITICAL INSTRUCTIONS:`,
-        `1. Respond ONLY with a valid JSON array. No other text before or after.`,
-        `2. Format: [{ "studentId": "<id>", "report": "<text>" }, ...]`,
-        `3. Include one object per student in the array.`,
-        `4. Follow the per-student instructions below EXACTLY for each student's report.`,
-        ``,
-        studentSections,
-      ].join("\n");
+      const prompt = buildBatchPrompt(batchStudents, batchConfig);
 
       res.status(200).json({ prompt });
     } catch (err) {
@@ -1169,9 +1175,6 @@ router.post(
           class_overview: true,
           progression_filters: true,
           test_filters: true,
-          tests: {
-            select: { id: true, name: true },
-          },
           disciplines: {
             select: { id: true, name: true },
             orderBy: { created_at: "asc" },
@@ -1250,13 +1253,12 @@ router.post(
         return;
       }
 
-      const ratingSummary = formatRatingSummary(
-        ratings.map((r) => ({
-          disciplineName: r.session_discipline.name,
-          score: r.score,
-          comment: r.comment,
-        }))
-      );
+      // Build raw ratings array (new API — no pre-formatted summary).
+      const rawRatingsRegen = ratings.map((r) => ({
+        name: r.session_discipline.name,
+        score: r.score,
+        comment: r.comment,
+      }));
 
       // Fetch topic ratings.
       const topicRatingRows = await prisma.topicRating.findMany({
@@ -1279,37 +1281,63 @@ router.post(
 
       // ── Fetch test context ──────────────────────────────────────────────────
       const regenTestFilters = (session.test_filters ?? {}) as Record<string, {
-        includeMark: boolean;
-        includePercentage: boolean;
-        includeGrade: boolean;
-        includeLowMention: boolean;
+        includeMark?: boolean;
+        includePercentage?: boolean;
+        includeGrade?: boolean;
+        includeLowMention?: boolean;
       }>;
-      const regenRelevantTestIds = (session.tests ?? [])
+
+      // Derive included test IDs from test_filters keys (tests may be class-level with no
+      // session_id, so we query by ID directly rather than relying on the session→tests relation).
+      const regenConfiguredTestIds = Object.keys(regenTestFilters);
+      const regenAllIncludedTests = regenConfiguredTestIds.length > 0
+        ? await prisma.test.findMany({
+            where: { id: { in: regenConfiguredTestIds }, class_id: session.class_id },
+            select: { id: true, name: true, max_mark: true },
+          })
+        : [];
+
+      // Rule 6 instruction derived from config — fires regardless of whether results exist yet
+      const regenTestInstruction = resolveTestInstructionFromConfig(
+        regenTestFilters,
+        regenAllIncludedTests.map((t) => t.id)
+      );
+
+      // Tests that need score data fetched (have at least one score flag set)
+      const regenScoredTestIds = regenAllIncludedTests
         .filter((t) => {
           const f = regenTestFilters[t.id];
-          return f && (f.includePercentage || f.includeGrade || f.includeLowMention);
+          return f && (f.includePercentage || f.includeGrade || f.includeLowMention || f.includeMark);
         })
         .map((t) => t.id);
 
       let testContext: TestContextItem[] | undefined;
-      if (regenRelevantTestIds.length > 0) {
-        const testResults = await prisma.testResult.findMany({
-          where: { test_id: { in: regenRelevantTestIds }, student_id: studentId },
-          select: { test_id: true, calculated: true },
-        });
+      if (regenAllIncludedTests.length > 0) {
+        const testResults = regenScoredTestIds.length > 0
+          ? await prisma.testResult.findMany({
+              where: { test_id: { in: regenScoredTestIds }, student_id: studentId },
+              select: { test_id: true, score: true, calculated: true },
+            })
+          : [];
         const resultByTestId = new Map(testResults.map((r) => [r.test_id, r]));
         const items: TestContextItem[] = [];
-        for (const test of session.tests ?? []) {
+        for (const test of regenAllIncludedTests) {
           const filter = regenTestFilters[test.id];
-          if (!filter) continue;
-          const result = resultByTestId.get(test.id);
-          if (!result) continue;
-          const calc = result.calculated as { percentage: number; grade: string | null };
-          const item: TestContextItem = { testName: test.name };
-          if (filter.includePercentage) item.percentage = calc.percentage;
-          if (filter.includeGrade) item.grade = calc.grade;
-          if (filter.includeLowMention) item.lowMention = true;
-          items.push(item);
+          const isScored = filter.includePercentage || filter.includeGrade || filter.includeLowMention || filter.includeMark;
+          if (isScored) {
+            const result = resultByTestId.get(test.id);
+            if (!result) continue; // no result yet — skip from block (Rule 6 still fires via testInstruction)
+            const calc = result.calculated as { percentage: number; grade: string | null };
+            const item: TestContextItem = { testName: test.name };
+            if (filter.includePercentage || filter.includeLowMention) item.percentage = calc.percentage;
+            if (filter.includeGrade) item.grade = calc.grade;
+            if (filter.includeLowMention) item.lowMention = true;
+            if (filter.includeMark) item.mark = `${result.score}/${test.max_mark ?? "?"}`;
+            items.push(item);
+          } else {
+            // Qualitative only — always include with just test name; no result needed
+            items.push({ testName: test.name });
+          }
         }
         if (items.length > 0) testContext = items;
       }
@@ -1393,34 +1421,31 @@ router.post(
       const effectiveTone = filters?.tone ?? session.tone;
       const effectiveLength = session.length as ReportLength;
 
-      // Build overview note: prefer request filter, fall back to session-saved class_overview.
+      // Build context note from optional overview + custom note.
       const overviewNote =
         filters?.overviewSummary?.trim() ??
         (session.class_overview?.trim() || undefined);
-
-      // Build custom note suffix for this specific student.
       const customNoteText = customNote?.trim();
+      const contextParts: string[] = [];
+      if (overviewNote) contextParts.push(`Class context: ${overviewNote}`);
+      if (customNoteText) contextParts.push(`Additional context: ${customNoteText}`);
+      const contextNote = contextParts.length > 0 ? contextParts.join(" — ") : undefined;
 
-      // Combine rating summary with overview and custom note context.
-      let ratingSummaryWithNote = ratingSummary;
-      if (overviewNote) {
-        ratingSummaryWithNote += ` (class context: ${overviewNote})`;
-      }
-      if (customNoteText) {
-        ratingSummaryWithNote += ` (additional context: ${customNoteText})`;
-      }
-
-      const promptText = buildPrompt({
+      const reportPromptObj = {
         firstName: student.first_name,
         gender: student.gender ?? "unspecified",
-        ratingSummary: ratingSummaryWithNote,
+        ratings: rawRatingsRegen,
         topics: session.topics_covered,
         tone: effectiveTone,
         length: effectiveLength,
         topicRatings,
         progression,
         testContext,
-      });
+        testInstruction: regenTestInstruction,
+        contextNote,
+      };
+
+      const promptText = buildPrompt(reportPromptObj);
 
       // ── Call LLM ────────────────────────────────────────────────────────────
       const provider = config.llmProvider;
@@ -1440,18 +1465,6 @@ router.post(
       }
 
       const adapter = createLLMAdapter(provider, apiKey);
-
-      const reportPromptObj = {
-        firstName: student.first_name,
-        gender: student.gender ?? "unspecified",
-        ratingSummary: ratingSummaryWithNote,
-        topics: session.topics_covered,
-        tone: effectiveTone,
-        length: effectiveLength,
-        topicRatings,
-        progression,
-        testContext,
-      };
 
       console.log(
         JSON.stringify({

@@ -20,7 +20,8 @@ CompactFilterBar was extracted from the session detail page into a standalone sh
   - progressionData fetched via GET /api/v1/sessions/:sessionId/progression-data (non-fatal)
   - `<CompactFilterBar>` rendered full-width between student nav bar and two-column content grid, inside a `bg-gray-50 border-b` wrapper
   - Mini filter summary bar ("Filters: Direct · Disciplines: 6...") removed entirely
-  - Regenerate button/panel highlights with `border-indigo-400`, `bg-indigo-50`, `ring-indigo-200`, `animate-pulse`, and "Filters updated" badge when `filtersChangedSinceGenerate` is true
+  - Regenerate button is secondary/outlined style: `border-indigo-600 text-indigo-600 bg-transparent hover:bg-indigo-50`; adds `animate-pulse` and label "Regenerate (filters changed)" when `filtersChangedSinceGenerate` is true; otherwise label is "Regenerate"
+  - "Mark Final + Next" remains primary filled style (bg-indigo-600 text-white) — clear visual hierarchy
   - `filtersChangedSinceGenerate` resets to false on regenerate click
 
 **How to apply:** When adding filter editing to any new page, import from `@/components/CompactFilterBar` — do not redefine inline.

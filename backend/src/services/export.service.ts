@@ -328,7 +328,7 @@ export async function exportSessionCSV(
 
   const start = Date.now();
 
-  const headers: (keyof ReportRow)[] = [
+  const keys: (keyof ReportRow)[] = [
     "ref_id",
     "first_name",
     "last_name",
@@ -339,6 +339,18 @@ export async function exportSessionCSV(
     "report_text",
     "generated_at",
   ];
+
+  const columnHeaders: Record<keyof ReportRow, string> = {
+    ref_id: "Ref ID",
+    first_name: "First Name",
+    last_name: "Last Name",
+    gender: "Gender",
+    session_name: "Session",
+    status: "Status",
+    word_count: "Word Count",
+    report_text: "Report Text",
+    generated_at: "Generated At",
+  };
 
   const rows: ReportRow[] = reports.map((r) => ({
     ref_id: r.student.student_ref_id ?? "",
@@ -353,22 +365,22 @@ export async function exportSessionCSV(
   }));
 
   const aoaData: unknown[][] = [
-    headers,
-    ...rows.map((row) => headers.map((h) => row[h])),
+    keys.map((k) => columnHeaders[k]),
+    ...rows.map((row) => keys.map((k) => row[k])),
   ];
 
   const worksheet = XLSX.utils.aoa_to_sheet(aoaData);
 
   worksheet["!cols"] = [
-    { wch: 14 }, // ref_id
-    { wch: 18 }, // first_name
-    { wch: 18 }, // last_name
-    { wch: 10 }, // gender
-    { wch: 30 }, // session_name
-    { wch: 10 }, // status
-    { wch: 12 }, // word_count
-    { wch: 60 }, // report_text
-    { wch: 24 }, // generated_at
+    { wch: 14 }, // Ref ID
+    { wch: 18 }, // First Name
+    { wch: 18 }, // Last Name
+    { wch: 10 }, // Gender
+    { wch: 30 }, // Session
+    { wch: 10 }, // Status
+    { wch: 12 }, // Word Count
+    { wch: 60 }, // Report Text
+    { wch: 24 }, // Generated At
   ];
 
   const workbook = XLSX.utils.book_new();
