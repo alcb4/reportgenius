@@ -29,10 +29,9 @@ const securityHeaders = [
 
 const nextConfig: NextConfig = {
   turbopack: {
-    // Point the workspace root to the frontend directory to avoid lockfile
-    // detection warnings when colocated with a parent monorepo.
     root: path.resolve(__dirname),
   },
+  serverExternalPackages: ['puppeteer'],
   async headers() {
     return [
       {

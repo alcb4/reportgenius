@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { authenticate } from '@/lib/authenticate'
-import { exportSessionPDF } from '@/lib/services/export.service'
+import { exportSessionPDF, PDFExportError } from '@/lib/services/export.service'
 
 export const dynamic = 'force-dynamic'
 export const maxDuration = 60
@@ -25,6 +25,9 @@ export async function GET(
       },
     })
   } catch (err: unknown) {
+    if (err instanceof PDFExportError) {
+      return NextResponse.json({ error: err.userFacingMessage, code: err.code, userFacing: true }, { status: 503 })
+    }
     if (err !== null && typeof err === 'object' && 'statusCode' in err && 'code' in err) {
       const domainErr = err as { statusCode: number; code: string; message: string }
       return NextResponse.json({ error: domainErr.message, code: domainErr.code }, { status: domainErr.statusCode })

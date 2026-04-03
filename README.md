@@ -65,7 +65,7 @@ OPENAI_API_KEY=sk-...        # your key
 ```bash
 cd frontend
 npm install                  # also runs `prisma generate` via postinstall
-npx prisma migrate dev --schema=../prisma/schema.prisma --name init
+npx prisma migrate dev --schema=./frontend/prisma/schema.prisma --name init
 ```
 
 ### 5. Start the dev server
@@ -96,7 +96,7 @@ Go to [supabase.com](https://supabase.com), create a project, then grab two conn
 ```bash
 # From the project root
 DATABASE_URL="<direct connection string>" \
-npx prisma migrate deploy --schema=./prisma/schema.prisma
+npx prisma migrate deploy --schema=./frontend/prisma/schema.prisma
 ```
 
 ### 3. Deploy to Vercel

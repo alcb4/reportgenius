@@ -1,26 +1,70 @@
 /**
  * Export service — PDF, ZIP, and XLSX exports.
- * Note: PDF export requires puppeteer-core + @sparticuz/chromium. On Vercel,
- * additional configuration is needed (see @sparticuz/chromium docs).
+ *
+ * PDF rendering uses one of two browser launch paths depending on DEPLOYMENT_MODE:
+ *   - "hosted"   → @sparticuz/chromium + puppeteer-core (serverless / Vercel)
+ *   - "standalone" (default) → full puppeteer (self-hosted, local Chromium)
  */
 
-import puppeteer from 'puppeteer-core'
-import chromium from '@sparticuz/chromium'
 import archiver from 'archiver'
 import ExcelJS from 'exceljs'
 import { Readable } from 'stream'
 import { prisma } from '@/lib/prisma'
 import { buildReportHTML, ReportHTMLData } from '@/lib/templates/report.html'
 
+// ── Custom error surfaced to API routes for user-friendly messaging ──────────
+
+export class PDFExportError extends Error {
+  constructor(
+    message: string,
+    public readonly userFacingMessage: string,
+    public readonly code: string = 'PDF_EXPORT_ERROR',
+  ) {
+    super(message)
+    this.name = 'PDFExportError'
+  }
+}
+
+// ── Browser launch (conditional per deployment mode) ─────────────────────────
+
+const isHosted = process.env.DEPLOYMENT_MODE === 'hosted'
+
+async function launchBrowser(): Promise<unknown> {
+  if (isHosted) {
+    try {
+      const [{ default: chromium }, { default: puppeteer }] = await Promise.all([
+        import('@sparticuz/chromium'),
+        import('puppeteer-core'),
+      ])
+
+      return puppeteer.launch({
+        args: puppeteer.defaultArgs({ args: chromium.args, headless: 'shell' }),
+        defaultViewport: { width: 794, height: 1123, deviceScaleFactor: 1 },
+        executablePath: await chromium.executablePath(),
+        headless: 'shell',
+      })
+    } catch (err: unknown) {
+      const detail = err instanceof Error ? err.message : String(err)
+      throw new PDFExportError(
+        `Chromium launch failed on hosted deployment: ${detail}`,
+        'PDF export is not available on the hosted demo. Self-host ReportGenius for full PDF export. View setup instructions at https://github.com/anomalyco/report_genius',
+        'PDF_EXPORT_UNAVAILABLE',
+      )
+    }
+  }
+
+  // standalone — full Puppeteer with bundled Chromium
+  const { default: puppeteer } = await import('puppeteer')
+  return puppeteer.launch({ headless: true })
+}
+
+// ── HTML → PDF ───────────────────────────────────────────────────────────────
+
 async function htmlToBuffer(html: string): Promise<Buffer> {
-  let browser: Awaited<ReturnType<typeof puppeteer.launch>> | null = null
+  let browser: any = null
 
   try {
-    browser = await puppeteer.launch({
-      args: puppeteer.defaultArgs({ args: chromium.args, headless: 'shell' }),
-      executablePath: await chromium.executablePath(),
-      headless: 'shell',
-    })
+    browser = await launchBrowser()
 
     const page = await browser.newPage()
     await page.setViewport({ width: 794, height: 1123, deviceScaleFactor: 1 })

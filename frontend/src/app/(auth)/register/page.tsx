@@ -158,41 +158,6 @@ export default function RegisterPage() {
               </label>
             </div>
 
-            <div className="space-y-3">
-              <label className="flex items-start gap-3 cursor-pointer">
-                <input
-                  type="checkbox"
-                  required
-                  checked={termsAccepted}
-                  onChange={(e) => setTermsAccepted(e.target.checked)}
-                  className="mt-0.5 h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500 shrink-0"
-                />
-                <span className="text-sm text-gray-700">
-                  I agree to the{" "}
-                  <Link href="/terms" target="_blank" className="text-indigo-600 hover:text-indigo-500 underline">
-                    Terms &amp; Conditions
-                  </Link>{" "}
-                  and{" "}
-                  <Link href="/privacy-policy" target="_blank" className="text-indigo-600 hover:text-indigo-500 underline">
-                    Privacy Policy
-                  </Link>
-                </span>
-              </label>
-
-              <label className="flex items-start gap-3 cursor-pointer">
-                <input
-                  type="checkbox"
-                  required
-                  checked={schoolAccepted}
-                  onChange={(e) => setSchoolAccepted(e.target.checked)}
-                  className="mt-0.5 h-4 w-4 rounded border-gray-300 text-indigo-600 focus:ring-indigo-500 shrink-0"
-                />
-                <span className="text-sm text-gray-700">
-                  I confirm I am authorised by my school to use third-party tools for storing student data
-                </span>
-              </label>
-            </div>
-
             {/* Honeypot — visually hidden, bots fill it, humans don't */}
             <div aria-hidden="true" style={{ position: 'absolute', left: '-9999px', width: '1px', height: '1px', overflow: 'hidden' }}>
               <label htmlFor="website">Website</label>

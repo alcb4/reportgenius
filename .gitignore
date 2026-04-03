@@ -53,3 +53,5 @@ build/
 .DS_Store
 backend/.env
 prisma/migrations/
+.claude/
+.claude/
