@@ -15,6 +15,17 @@ export async function POST(
 
   const { sessionId } = await params
 
+  // Parse optional targetClassId from request body
+  let targetClassId: string | undefined
+  try {
+    const body = await req.json().catch(() => ({}))
+    if (body && typeof body.targetClassId === 'string' && body.targetClassId.trim()) {
+      targetClassId = body.targetClassId.trim()
+    }
+  } catch {
+    // body is optional — fall through
+  }
+
   try {
     const source = await prisma.reportSession.findFirst({
       where: { id: sessionId, organization_id: user.organizationId },
@@ -26,12 +37,26 @@ export async function POST(
 
     if (!source) return NextResponse.json({ error: 'Session not found', code: 'SESSION_NOT_FOUND' }, { status: 404 })
 
+    // Resolve the class to duplicate into; default to the source class
+    const resolvedClassId = targetClassId ?? source.class_id
+
+    // If a targetClassId was provided, validate it belongs to the same organisation
+    if (targetClassId && targetClassId !== source.class_id) {
+      const targetClass = await prisma.class.findFirst({
+        where: { id: targetClassId, organization_id: user.organizationId },
+        select: { id: true },
+      })
+      if (!targetClass) {
+        return NextResponse.json({ error: 'Target class not found', code: 'CLASS_NOT_FOUND' }, { status: 404 })
+      }
+    }
+
     const newSession = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
       const created = await tx.reportSession.create({
         data: {
           id: randomUUID(),
           organization_id: user.organizationId,
-          class_id: source.class_id,
+          class_id: resolvedClassId,
           name: `${source.name} (Copy)`,
           topics_covered: source.topics_covered,
           tone: source.tone,
@@ -40,7 +65,7 @@ export async function POST(
           progression_filters: [],
         },
         select: {
-          id: true, name: true, topics_covered: true, tone: true,
+          id: true, class_id: true, name: true, topics_covered: true, tone: true,
           length: true, status: true, created_at: true, updated_at: true,
         },
       })

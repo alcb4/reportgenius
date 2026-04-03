@@ -6,10 +6,20 @@ import { rateLimitOrNull } from '@/lib/ratelimit'
 
 export const dynamic = 'force-dynamic'
 
+// Hard limits — protect against accidental or malicious oversized payloads.
+// 500 KB is generous for a full class batch (~500 words × 50 students × 8 chars/word ≈ 200 KB).
+const MAX_RAW_BYTES = 500_000   // 500 KB character cap
+const MAX_REPORTS_PER_BATCH = 50 // max items in the parsed JSON array
+
 const ParseReportsSchema = z.object({
-  // ~500 words × 30 students × 8 chars/word ≈ 120 KB; cap at 200 KB
-  raw: z.string().min(1).max(200_000, 'Pasted content is too large'),
-  studentIds: z.array(z.string().min(1)).min(1).max(200, 'Too many student IDs in one batch'),
+  raw: z
+    .string()
+    .min(1)
+    .max(MAX_RAW_BYTES, 'Pasted content is too large'),
+  studentIds: z
+    .array(z.string().min(1))
+    .min(1)
+    .max(MAX_REPORTS_PER_BATCH, `Too many student IDs — maximum ${MAX_REPORTS_PER_BATCH} per batch`),
 })
 
 export async function POST(
@@ -86,6 +96,27 @@ export async function POST(
           error: 'Response is not a JSON array',
           hint: 'Expected a JSON array like: [{ "studentId": "...", "report": "..." }]',
           code: 'PARSE_ERROR',
+        },
+        { status: 422 }
+      )
+    }
+
+    // Guard: reject if the parsed array itself exceeds the per-batch cap.
+    // This prevents a crafted payload that passes the studentIds length check
+    // but embeds thousands of items in the JSON body, causing an unbounded loop.
+    if (items.length > MAX_REPORTS_PER_BATCH) {
+      console.warn(JSON.stringify({
+        event: 'parse_reports.input_too_large',
+        sessionId,
+        organizationId: user.organizationId,
+        itemsReceived: items.length,
+        rawLengthChars: raw.length,
+        cap: MAX_REPORTS_PER_BATCH,
+      }))
+      return NextResponse.json(
+        {
+          error: `Input exceeds maximum allowed size — received ${items.length} report items, maximum is ${MAX_REPORTS_PER_BATCH}`,
+          code: 'INPUT_TOO_LARGE',
         },
         { status: 422 }
       )

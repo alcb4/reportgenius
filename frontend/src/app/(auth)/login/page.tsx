@@ -527,7 +527,7 @@ function FilterPanel({
   const [classOverview, setClassOverview] = useState<string>(session.class_overview ?? "");
 
   // Sync tone from session if it changes externally
-  useEffect(() => { setTone(session.tone); }, [session.tone]);
+  useEffect(() => { void Promise.resolve().then(() => { setTone(session.tone); }); }, [session.tone]);
 
   // Debounce ref for overview saves
   const overviewTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1071,10 +1071,9 @@ export default function SessionDetailPage() {
         .join(" — ")
     : "";
 
-  const API_URL =
-    typeof window !== "undefined"
-      ? (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001")
-      : "http://localhost:3001";
+  // Use empty-string base so all export URLs are relative (same-origin).
+  // This avoids CSP violations from calling the Express backend on port 3001 directly.
+  const API_URL = "";
 
   return (
     <div className="w-full space-y-6">

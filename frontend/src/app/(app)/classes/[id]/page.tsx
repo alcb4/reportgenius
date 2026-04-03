@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useRef, KeyboardEvent, FormEvent } from "react";
+import { useEffect, useState, useRef, useMemo, KeyboardEvent, FormEvent } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { apiFetch, APIError } from "@/lib/api";
@@ -26,6 +26,25 @@ interface Session {
   created_at: string;
   updated_at: string;
   _count: { disciplines: number; reports: number };
+}
+
+interface Test {
+  id: string;
+  name: string;
+  topics: string[];
+  max_mark: number;
+  grade_boundaries: Record<string, number>;
+  created_at: string;
+  _count: { results: number };
+}
+
+interface ClassListItem {
+  id: string;
+  name: string;
+  year_group: string | null;
+  subject: string | null;
+  archived: boolean;
+  _count: { students: number };
 }
 
 interface ClassDetail {
@@ -219,14 +238,7 @@ function CreateSessionModal({
         const result = await apiFetch<DisciplineTemplatesResponse>("/api/v1/discipline-templates");
         if (!cancelled) {
           setTemplates(result.data);
-          // Pre-tick all is_default disciplines
-          const defaults = new Set<string>();
-          for (const group of result.data) {
-            for (const d of group.disciplines) {
-              if (d.is_default) defaults.add(d.id);
-            }
-          }
-          setSelectedTemplateIds(defaults);
+          // Leave selectedTemplateIds empty — teacher selects what they want
         }
       } catch {
         // Non-fatal — disciplines are optional
@@ -845,21 +857,59 @@ function BulkAddModal({
 
   async function handleSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
-    const names = text
+
+    const lines = text
       .split("\n")
       .map((l) => l.trim())
       .filter(Boolean);
-    if (names.length === 0) { setError("Enter at least one name."); return; }
-    if (names.length > 100) { setError("Maximum 100 students at a time."); return; }
+
+    if (lines.length === 0) { setError("Enter at least one student."); return; }
+    if (lines.length > 100) { setError("Maximum 100 students at a time."); return; }
+
+    const skipped: number[] = [];
+    const students = lines.reduce<{ first_name: string; last_name: string; student_ref_id?: string | null; gender?: string | null }[]>((acc, line, idx) => {
+      const parts = line.split(",").map((p) => p.trim());
+      const first_name = parts[0] ?? "";
+      const last_name = parts[1] ?? "";
+
+      if (!first_name || !last_name) {
+        skipped.push(idx + 1);
+        return acc;
+      }
+
+      const rawId = parts[2] ?? "";
+      const student_ref_id = rawId || null;
+
+      const rawGender = (parts[3] ?? "").toUpperCase();
+      const gender =
+        rawGender === "M" ? "M" :
+        rawGender === "F" ? "F" :
+        rawGender === "OTHER" ? "Other" :
+        null;
+
+      acc.push({ first_name, last_name, student_ref_id, gender });
+      return acc;
+    }, []);
+
+    if (students.length === 0) {
+      setError("No valid students found. Each row needs at least first name and last name.");
+      return;
+    }
+
+    const warningMsg = skipped.length > 0
+      ? `Rows ${skipped.join(", ")} skipped (missing first or last name). `
+      : "";
+
     setError(null);
     setLoading(true);
     try {
-      interface BulkAddResponse { students: Student[]; count: number }
+      interface BulkAddResponse { data: Student[]; count: number }
       const result = await apiFetch<BulkAddResponse>(`/api/v1/classes/${classId}/students/bulk`, {
         method: "POST",
-        body: { students: names.map((n) => ({ first_name: n })) },
+        body: { students },
       });
-      onAdded(result.students);
+      if (warningMsg) setError(warningMsg);
+      onAdded(result.data);
     } catch (err) {
       setError(err instanceof APIError ? err.message : "Failed to bulk add students.");
       setLoading(false);
@@ -879,12 +929,13 @@ function BulkAddModal({
         </div>
         <form onSubmit={handleSubmit} noValidate>
           <div className="px-6 py-5 space-y-4">
-            <p className="text-sm text-gray-500">Paste one student name per line (first name only). Maximum 100 at once.</p>
+            <p className="text-sm text-gray-500">Paste one student per line as CSV: <span className="font-mono">first_name, last_name, student_id, gender</span>. Student ID and gender are optional. Gender: M / F / Other. Maximum 100 at once.</p>
             <textarea
               value={text}
               onChange={(e) => setText(e.target.value)}
               rows={10}
-              placeholder={"Alice\nBob\nCharlie"}
+              placeholder={"Alan,Davies,0001,M\nEmma,Thompson,0002,F\nJames,Carter,,"}
+
               className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm font-mono focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none transition resize-y"
             />
             {error && (
@@ -1023,6 +1074,632 @@ function EditClassModal({
   );
 }
 
+// ── Test Modal (Add / Edit) ───────────────────────────────────────────────────
+
+interface BoundaryRow {
+  label: string;
+  pct: string;
+}
+
+function TestModal({
+  classId,
+  existing,
+  onClose,
+  onSaved,
+}: {
+  classId: string;
+  existing: Test | null;
+  onClose: () => void;
+  onSaved: (test: Test) => void;
+}) {
+  const [name, setName] = useState(existing?.name ?? "");
+  const [topics, setTopics] = useState<string[]>(existing?.topics ?? []);
+  const [maxMark, setMaxMark] = useState(existing ? String(existing.max_mark) : "");
+  const [showBoundaries, setShowBoundaries] = useState(
+    existing ? Object.keys(existing.grade_boundaries).length > 0 : false
+  );
+  const [boundaries, setBoundaries] = useState<BoundaryRow[]>(() => {
+    if (!existing || Object.keys(existing.grade_boundaries).length === 0) return [];
+    return Object.entries(existing.grade_boundaries).map(([label, pct]) => ({
+      label,
+      pct: String(pct),
+    }));
+  });
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  function addBoundary() {
+    setBoundaries((prev) => [...prev, { label: "", pct: "" }]);
+  }
+
+  function removeBoundary(idx: number) {
+    setBoundaries((prev) => prev.filter((_, i) => i !== idx));
+  }
+
+  function updateBoundary(idx: number, field: "label" | "pct", value: string) {
+    setBoundaries((prev) =>
+      prev.map((b, i) => (i === idx ? { ...b, [field]: value } : b))
+    );
+  }
+
+  async function handleSubmit(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    if (!name.trim()) { setError("Test name is required."); return; }
+    const markNum = parseInt(maxMark, 10);
+    if (!maxMark || isNaN(markNum) || markNum < 1) { setError("Total marks must be a positive integer."); return; }
+
+    // Build grade_boundaries
+    const grade_boundaries: Record<string, number> = {};
+    for (const row of boundaries) {
+      if (!row.label.trim() && !row.pct.trim()) continue;
+      if (!row.label.trim()) { setError("Each grade boundary needs a label."); return; }
+      const pctNum = parseFloat(row.pct);
+      if (isNaN(pctNum) || pctNum < 0 || pctNum > 100) { setError(`Boundary "${row.label}" needs a valid percentage (0–100).`); return; }
+      grade_boundaries[row.label.trim()] = pctNum;
+    }
+
+    setError(null);
+    setLoading(true);
+
+    try {
+      interface TestResponse { data: Test }
+      const url = existing
+        ? `/api/v1/classes/${classId}/tests/${existing.id}`
+        : `/api/v1/classes/${classId}/tests`;
+      const result = await apiFetch<TestResponse>(url, {
+        method: existing ? "PUT" : "POST",
+        body: {
+          name: name.trim(),
+          topics,
+          max_mark: markNum,
+          grade_boundaries,
+        },
+      });
+      onSaved(result.data);
+    } catch (err) {
+      setError(err instanceof APIError ? err.message : "Failed to save test.");
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-start justify-center bg-black/40 overflow-y-auto py-8">
+      <div className="bg-white rounded-xl shadow-xl w-full max-w-lg mx-4 my-auto">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
+          <h2 className="text-lg font-semibold text-gray-900">{existing ? "Edit Test" : "New Test"}</h2>
+          <button
+            onClick={onClose}
+            className="p-1.5 rounded-md text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition"
+            aria-label="Close"
+          >
+            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+
+        <form onSubmit={handleSubmit} noValidate>
+          <div className="px-6 py-5 space-y-5 max-h-[70vh] overflow-y-auto">
+            {/* Name */}
+            <div>
+              <label htmlFor="test-name" className="block text-sm font-medium text-gray-700 mb-1">
+                Name <span className="text-red-500">*</span>
+              </label>
+              <input
+                id="test-name"
+                type="text"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="End of Unit Test"
+                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none transition"
+              />
+            </div>
+
+            {/* Total marks */}
+            <div>
+              <label htmlFor="test-max-mark" className="block text-sm font-medium text-gray-700 mb-1">
+                Total marks <span className="text-red-500">*</span>
+              </label>
+              <input
+                id="test-max-mark"
+                type="number"
+                min={1}
+                step={1}
+                value={maxMark}
+                onChange={(e) => setMaxMark(e.target.value)}
+                placeholder="100"
+                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none transition"
+              />
+            </div>
+
+            {/* Topics */}
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">Topics covered</label>
+              <TagInput tags={topics} onChange={setTopics} placeholder="Type a topic and press Enter" />
+            </div>
+
+            {/* Grade boundaries */}
+            <div>
+              <button
+                type="button"
+                onClick={() => setShowBoundaries((v) => !v)}
+                className="flex items-center gap-1.5 text-sm font-medium text-gray-700 hover:text-gray-900 transition"
+              >
+                <svg
+                  className={`w-4 h-4 transition-transform ${showBoundaries ? "rotate-90" : ""}`}
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                  strokeWidth={2}
+                >
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+                </svg>
+                Grade boundaries
+                <span className="text-xs text-gray-400 font-normal ml-1">(optional)</span>
+              </button>
+
+              {showBoundaries && (
+                <div className="mt-3 space-y-2">
+                  {/* Preset pills */}
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="text-xs text-gray-400">Presets:</span>
+                    <button
+                      type="button"
+                      onClick={() => setBoundaries([
+                        { label: "A", pct: "90" },
+                        { label: "B", pct: "80" },
+                        { label: "C", pct: "70" },
+                        { label: "D", pct: "60" },
+                        { label: "E", pct: "50" },
+                        { label: "F", pct: "0" },
+                      ])}
+                      className="rounded-full border border-gray-300 px-3 py-1 text-sm text-gray-600 hover:border-indigo-400 hover:text-indigo-600 transition"
+                    >
+                      A–F
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setBoundaries([
+                        { label: "9", pct: "90" },
+                        { label: "8", pct: "80" },
+                        { label: "7", pct: "70" },
+                        { label: "6", pct: "60" },
+                        { label: "5", pct: "50" },
+                        { label: "4", pct: "40" },
+                        { label: "3", pct: "30" },
+                        { label: "2", pct: "20" },
+                        { label: "1", pct: "0" },
+                      ])}
+                      className="rounded-full border border-gray-300 px-3 py-1 text-sm text-gray-600 hover:border-indigo-400 hover:text-indigo-600 transition"
+                    >
+                      1–9
+                    </button>
+                  </div>
+                  {boundaries.length === 0 && (
+                    <p className="text-xs text-gray-400">No boundaries yet. Add one below.</p>
+                  )}
+                  {boundaries.map((row, idx) => (
+                    <div key={idx} className="flex items-center gap-2">
+                      <input
+                        type="text"
+                        value={row.label}
+                        onChange={(e) => updateBoundary(idx, "label", e.target.value)}
+                        placeholder="Grade (e.g. A)"
+                        className="w-28 rounded-md border border-gray-300 px-3 py-1.5 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none transition"
+                      />
+                      <span className="text-sm text-gray-400">&ge;</span>
+                      <input
+                        type="number"
+                        min={0}
+                        max={100}
+                        value={row.pct}
+                        onChange={(e) => updateBoundary(idx, "pct", e.target.value)}
+                        placeholder="Min %"
+                        className="w-24 rounded-md border border-gray-300 px-3 py-1.5 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none transition"
+                      />
+                      <span className="text-xs text-gray-400">%</span>
+                      <button
+                        type="button"
+                        onClick={() => removeBoundary(idx)}
+                        className="text-gray-400 hover:text-red-500 transition ml-auto"
+                        aria-label="Remove boundary"
+                      >
+                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+                        </svg>
+                      </button>
+                    </div>
+                  ))}
+                  <button
+                    type="button"
+                    onClick={addBoundary}
+                    className="mt-1 text-xs font-medium text-indigo-600 hover:text-indigo-800 transition"
+                  >
+                    + Add boundary
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {error && (
+            <div className="mx-6 mb-2 rounded-md bg-red-50 border border-red-200 px-4 py-2.5 text-sm text-red-700">
+              {error}
+            </div>
+          )}
+          <div className="flex items-center justify-end gap-3 px-6 py-4 border-t border-gray-200">
+            <button
+              type="button"
+              onClick={onClose}
+              className="px-4 py-2 rounded-md border border-gray-300 text-sm font-medium text-gray-700 hover:bg-gray-50 transition"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={loading || !name.trim() || !maxMark}
+              className="px-5 py-2 rounded-md bg-indigo-600 text-sm font-semibold text-white hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition"
+            >
+              {loading ? "Saving..." : existing ? "Save Changes" : "Create Test"}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+// ── Duplicate Test Modal ──────────────────────────────────────────────────────
+
+function DuplicateTestModal({
+  classId,
+  test,
+  onClose,
+  onDuplicated,
+}: {
+  classId: string;
+  test: Test;
+  onClose: () => void;
+  onDuplicated: (newTest: Test, targetClassId: string) => void;
+}) {
+  const [classes, setClasses] = useState<ClassListItem[]>([]);
+  const [loadingClasses, setLoadingClasses] = useState(true);
+  const [selectedClassId, setSelectedClassId] = useState<string | null>(null);
+  const [duplicating, setDuplicating] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      try {
+        interface ClassListResponse { data: ClassListItem[] }
+        const result = await apiFetch<ClassListResponse>("/api/v1/classes");
+        if (!cancelled) {
+          setClasses(result.data.filter((c) => !c.archived));
+        }
+      } catch {
+        if (!cancelled) setError("Failed to load classes.");
+      } finally {
+        if (!cancelled) setLoadingClasses(false);
+      }
+    }
+    load();
+    return () => { cancelled = true; };
+  }, []);
+
+  async function handleDuplicate() {
+    if (!selectedClassId) return;
+    setDuplicating(true);
+    setError(null);
+    try {
+      interface CopyResponse { data: Test }
+      const result = await apiFetch<CopyResponse>(`/api/v1/classes/${classId}/tests/copy`, {
+        method: "POST",
+        body: { testId: test.id, targetClassId: selectedClassId },
+      });
+      onDuplicated(result.data, selectedClassId);
+    } catch (err) {
+      setError(err instanceof APIError ? err.message : "Failed to duplicate test.");
+      setDuplicating(false);
+    }
+  }
+
+  const selectedClass = classes.find((c) => c.id === selectedClassId);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+      <div className="bg-white rounded-xl shadow-xl w-full max-w-md mx-4">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200">
+          <h2 className="text-lg font-semibold text-gray-900">Duplicate Test</h2>
+          <button
+            onClick={onClose}
+            className="p-1.5 rounded-md text-gray-400 hover:text-gray-600 hover:bg-gray-100 transition"
+            aria-label="Close"
+          >
+            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+
+        <div className="px-6 py-5 space-y-4">
+          <p className="text-sm text-gray-600">
+            Duplicating <span className="font-medium">&ldquo;{test.name}&rdquo;</span>. Choose a destination class:
+          </p>
+
+          {loadingClasses ? (
+            <div className="space-y-2 animate-pulse">
+              {[1, 2, 3].map((n) => <div key={n} className="h-12 bg-gray-100 rounded-lg" />)}
+            </div>
+          ) : (
+            <div className="space-y-1.5 max-h-60 overflow-y-auto">
+              {classes.map((c) => (
+                <button
+                  key={c.id}
+                  type="button"
+                  onClick={() => setSelectedClassId(c.id)}
+                  className={`w-full text-left px-4 py-3 rounded-lg border transition ${
+                    selectedClassId === c.id
+                      ? "border-indigo-500 bg-indigo-50"
+                      : "border-gray-200 hover:border-gray-300 hover:bg-gray-50"
+                  }`}
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm font-medium text-gray-900">{c.name}</span>
+                    {c.id === classId && (
+                      <span className="text-xs text-gray-400">(this class)</span>
+                    )}
+                  </div>
+                  {(c.year_group || c.subject) && (
+                    <p className="text-xs text-gray-400 mt-0.5">
+                      {[c.year_group && `Year ${c.year_group}`, c.subject].filter(Boolean).join(" · ")}
+                    </p>
+                  )}
+                </button>
+              ))}
+            </div>
+          )}
+
+          {error && (
+            <p className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-md px-3 py-2">{error}</p>
+          )}
+        </div>
+
+        <div className="flex items-center justify-end gap-3 px-6 py-4 border-t border-gray-200">
+          <button
+            type="button"
+            onClick={onClose}
+            className="px-4 py-2 rounded-md border border-gray-300 text-sm font-medium text-gray-700 hover:bg-gray-50 transition"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={handleDuplicate}
+            disabled={!selectedClassId || duplicating}
+            className="px-5 py-2 rounded-md bg-indigo-600 text-sm font-semibold text-white hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition"
+          >
+            {duplicating
+              ? "Duplicating..."
+              : selectedClass
+              ? `Duplicate to ${selectedClass.name}`
+              : "Duplicate"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Tests card ────────────────────────────────────────────────────────────────
+
+function TestsCard({ classId }: { classId: string }) {
+  const [tests, setTests] = useState<Test[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [openMenuId, setOpenMenuId] = useState<string | null>(null);
+  const [showAddEdit, setShowAddEdit] = useState(false);
+  const [editingTest, setEditingTest] = useState<Test | null>(null);
+  const [duplicatingTest, setDuplicatingTest] = useState<Test | null>(null);
+  const [deletingTestId, setDeletingTestId] = useState<string | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      try {
+        interface TestListResponse { data: Test[] }
+        const result = await apiFetch<TestListResponse>(`/api/v1/classes/${classId}/tests`);
+        if (!cancelled) setTests(result.data);
+      } catch {
+        // Non-fatal
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+    load();
+    return () => { cancelled = true; };
+  }, [classId]);
+
+  // Close menu on outside click
+  useEffect(() => {
+    function handleClick(e: MouseEvent) {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setOpenMenuId(null);
+      }
+    }
+    document.addEventListener("mousedown", handleClick);
+    return () => document.removeEventListener("mousedown", handleClick);
+  }, []);
+
+  function showToast(msg: string) {
+    setToast(msg);
+    setTimeout(() => setToast(null), 4000);
+  }
+
+  function handleSaved(test: Test) {
+    setTests((prev) => {
+      const idx = prev.findIndex((t) => t.id === test.id);
+      if (idx >= 0) {
+        const next = [...prev];
+        next[idx] = test;
+        return next;
+      }
+      return [test, ...prev];
+    });
+    setShowAddEdit(false);
+    setEditingTest(null);
+  }
+
+  function handleDuplicated(newTest: Test, targetClassId: string) {
+    if (targetClassId === classId) {
+      setTests((prev) => [newTest, ...prev]);
+    }
+    setDuplicatingTest(null);
+    showToast(`"${newTest.name}" duplicated successfully.`);
+  }
+
+  async function handleDelete(testId: string) {
+    try {
+      await apiFetch(`/api/v1/classes/${classId}/tests/${testId}`, { method: "DELETE" });
+      setTests((prev) => prev.filter((t) => t.id !== testId));
+    } catch {
+      // Silently ignore for now
+    } finally {
+      setDeletingTestId(null);
+    }
+  }
+
+  const hasBoundaries = (t: Test) => Object.keys(t.grade_boundaries).length > 0;
+
+  return (
+    <>
+      {/* Modals */}
+      {(showAddEdit || editingTest) && (
+        <TestModal
+          classId={classId}
+          existing={editingTest}
+          onClose={() => { setShowAddEdit(false); setEditingTest(null); }}
+          onSaved={handleSaved}
+        />
+      )}
+      {duplicatingTest && (
+        <DuplicateTestModal
+          classId={classId}
+          test={duplicatingTest}
+          onClose={() => setDuplicatingTest(null)}
+          onDuplicated={handleDuplicated}
+        />
+      )}
+      {deletingTestId && (
+        <ConfirmDialog
+          message="Delete this test? All student results for this test will also be deleted. This cannot be undone."
+          confirmLabel="Delete Test"
+          onConfirm={() => handleDelete(deletingTestId)}
+          onCancel={() => setDeletingTestId(null)}
+        />
+      )}
+
+      {/* Toast */}
+      {toast && (
+        <div className="fixed bottom-6 right-6 z-50 bg-gray-900 text-white text-sm px-4 py-2.5 rounded-lg shadow-lg">
+          {toast}
+        </div>
+      )}
+
+      <div className="bg-white rounded-lg border border-gray-200 shadow-sm">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+          <h2 className="text-sm font-semibold text-gray-700 uppercase tracking-wide">Tests</h2>
+          <button
+            onClick={() => { setEditingTest(null); setShowAddEdit(true); }}
+            className="px-3 py-1.5 rounded-md bg-indigo-600 text-xs font-semibold text-white hover:bg-indigo-700 transition"
+          >
+            + Add Test
+          </button>
+        </div>
+
+        {loading ? (
+          <div className="px-6 py-4 space-y-3 animate-pulse">
+            {[1, 2].map((n) => <div key={n} className="h-10 bg-gray-100 rounded" />)}
+          </div>
+        ) : tests.length === 0 ? (
+          <div className="px-6 py-10 text-center">
+            <p className="text-sm text-gray-400 mb-3">No tests yet. Add your first test.</p>
+            <button
+              onClick={() => { setEditingTest(null); setShowAddEdit(true); }}
+              className="text-sm text-indigo-600 hover:text-indigo-700 font-medium transition"
+            >
+              + Add Test
+            </button>
+          </div>
+        ) : (
+          <div className="divide-y divide-gray-50" ref={menuRef}>
+            {tests.map((test) => (
+              <div key={test.id} className="flex items-center justify-between px-6 py-3.5 group hover:bg-gray-50 transition">
+                <Link href={`/classes/${classId}/tests/${test.id}`} className="min-w-0 flex-1 mr-4">
+                  <span className="font-medium text-gray-900 text-sm hover:text-indigo-600 transition">{test.name}</span>
+                  <div className="flex items-center gap-3 mt-0.5 text-xs text-gray-400">
+                    <span>{test.max_mark} marks</span>
+                    <span
+                      title={hasBoundaries(test) ? Object.entries(test.grade_boundaries).map(([g, p]) => `${g}: ${p}%`).join(", ") : "No grade boundaries set"}
+                    >
+                      {hasBoundaries(test) ? "✓ grades" : "— grades"}
+                    </span>
+                    <span>{test.topics.length} topic{test.topics.length !== 1 ? "s" : ""}</span>
+                  </div>
+                </Link>
+
+                {/* Three-dot menu */}
+                <div className="relative shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => setOpenMenuId(openMenuId === test.id ? null : test.id)}
+                    className="p-1.5 rounded-md text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition opacity-0 group-hover:opacity-100 focus:opacity-100"
+                    aria-label="Test options"
+                  >
+                    <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
+                      <circle cx="12" cy="5" r="1.5" />
+                      <circle cx="12" cy="12" r="1.5" />
+                      <circle cx="12" cy="19" r="1.5" />
+                    </svg>
+                  </button>
+
+                  {openMenuId === test.id && (
+                    <div className="absolute right-0 top-8 z-20 w-36 bg-white rounded-lg border border-gray-200 shadow-lg py-1">
+                      <button
+                        type="button"
+                        onClick={() => { setEditingTest(test); setShowAddEdit(false); setOpenMenuId(null); }}
+                        className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 transition"
+                      >
+                        Edit
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => { setDuplicatingTest(test); setOpenMenuId(null); }}
+                        className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 transition"
+                      >
+                        Duplicate
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => { setDeletingTestId(test.id); setOpenMenuId(null); }}
+                        className="w-full text-left px-4 py-2 text-sm text-red-600 hover:bg-red-50 transition"
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+            ))}
+
+          </div>
+        )}
+      </div>
+    </>
+  );
+}
+
 // ── Skeleton ──────────────────────────────────────────────────────────────────
 
 function ClassDetailSkeleton() {
@@ -1069,6 +1746,34 @@ export default function ClassDetailPage() {
   const [archiving, setArchiving] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
 
+  // Student table sort state
+  const [sortField, setSortField] = useState<'first_name' | 'last_name' | 'student_ref_id' | null>(null);
+  const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc');
+
+  function handleSortHeader(field: 'first_name' | 'last_name' | 'student_ref_id') {
+    if (sortField !== field) {
+      setSortField(field);
+      setSortDir('asc');
+    } else if (sortDir === 'asc') {
+      setSortDir('desc');
+    } else {
+      // third click — reset
+      setSortField(null);
+      setSortDir('asc');
+    }
+  }
+
+  const sortedStudents = useMemo(() => {
+    const students = cls?.students ?? [];
+    if (!sortField) return students;
+    return [...students].sort((a, b) => {
+      const aVal = a[sortField] ?? '';
+      const bVal = b[sortField] ?? '';
+      const cmp = aVal.localeCompare(bVal, undefined, { numeric: true });
+      return sortDir === 'asc' ? cmp : -cmp;
+    });
+  }, [cls?.students, sortField, sortDir]);
+
   useEffect(() => {
     if (!id) return;
     let cancelled = false;
@@ -1108,10 +1813,8 @@ export default function ClassDetailPage() {
   }
 
   function handleBulkAdded(students: Student[]) {
-    setCls((prev) => prev ? {
-      ...prev,
-      students: [...prev.students, ...students].sort((a, b) => a.first_name.localeCompare(b.first_name)),
-    } : prev);
+    // API returns all students in the class (already sorted), replace the list wholesale
+    setCls((prev) => prev ? { ...prev, students } : prev);
     setShowBulkAdd(false);
   }
 
@@ -1302,15 +2005,28 @@ export default function ClassDetailPage() {
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-gray-100 text-left">
-                  <th className="px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">First Name</th>
-                  <th className="px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Last Name</th>
-                  <th className="px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Ref ID</th>
+                  {(['first_name', 'last_name', 'student_ref_id'] as const).map((field, i) => {
+                    const labels: Record<string, string> = { first_name: 'First Name', last_name: 'Last Name', student_ref_id: 'Ref ID' };
+                    const active = sortField === field;
+                    const icon = active ? (sortDir === 'asc' ? ' ↑' : ' ↓') : ' ↕';
+                    return (
+                      <th
+                        key={field}
+                        onClick={() => handleSortHeader(field)}
+                        className={`px-4 py-3 text-xs font-semibold uppercase tracking-wide cursor-pointer select-none transition ${active ? 'text-indigo-600' : 'text-gray-500 hover:text-gray-700'}`}
+                        style={i === 0 ? {} : undefined}
+                      >
+                        {labels[field]}
+                        <span className={active ? 'text-indigo-500' : 'text-gray-300'}>{icon}</span>
+                      </th>
+                    );
+                  })}
                   <th className="px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Gender</th>
                   <th className="px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-50">
-                {cls.students.map((student) =>
+                {sortedStudents.map((student) =>
                   editingStudentId === student.id ? (
                     <EditStudentRow
                       key={student.id}
@@ -1355,6 +2071,9 @@ export default function ClassDetailPage() {
           </div>
         )}
       </div>
+
+      {/* Tests section */}
+      <TestsCard classId={id} />
 
       {/* Report Sessions section */}
       <div className="bg-white rounded-lg border border-gray-200 shadow-sm">

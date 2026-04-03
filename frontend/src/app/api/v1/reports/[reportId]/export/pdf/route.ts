@@ -7,7 +7,10 @@ export const dynamic = 'force-dynamic'
 export const maxDuration = 60
 
 function safeFilename(raw: string): string {
-  return raw.replace(/[^a-zA-Z0-9_\- ]/g, '_').trim() || 'file'
+  return raw
+    .replace(/[/\\:*?"<>|]/g, '-')
+    .replace(/ {2,}/g, ' ')
+    .trim() || 'file'
 }
 
 export async function GET(
@@ -22,18 +25,22 @@ export async function GET(
   try {
     const report = await prisma.report.findFirst({
       where: { id: reportId, organization_id: user.organizationId },
-      select: { student: { select: { first_name: true } } },
+      select: {
+        student: { select: { first_name: true } },
+        session: { select: { name: true } },
+      },
     })
 
     if (!report) return NextResponse.json({ error: 'Report not found', code: 'REPORT_NOT_FOUND' }, { status: 404 })
 
     const firstName = safeFilename(report.student.first_name)
+    const sessionName = safeFilename(report.session?.name ?? 'report')
     const pdfBuffer = await exportReportPDF(reportId, user.organizationId)
 
     return new NextResponse(new Uint8Array(pdfBuffer), {
       headers: {
         'Content-Type': 'application/pdf',
-        'Content-Disposition': `attachment; filename="${firstName}_report.pdf"`,
+        'Content-Disposition': `attachment; filename="${sessionName} - ${firstName}.pdf"`,
         'Content-Length': String(pdfBuffer.length),
       },
     })

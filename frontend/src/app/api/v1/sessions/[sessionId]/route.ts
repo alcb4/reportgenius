@@ -141,3 +141,32 @@ export async function PUT(
     return NextResponse.json({ error: 'Internal server error', code: 'INTERNAL_ERROR' }, { status: 500 })
   }
 }
+
+export async function DELETE(
+  req: NextRequest,
+  { params }: { params: Promise<{ sessionId: string }> }
+) {
+  const user = await authenticate(req)
+  if (!user) return NextResponse.json({ error: 'Unauthorized', code: 'AUTH_MISSING' }, { status: 401 })
+
+  const { sessionId } = await params
+
+  try {
+    const existing = await prisma.reportSession.findFirst({
+      where: { id: sessionId, organization_id: user.organizationId },
+      select: { id: true },
+    })
+    if (!existing) return NextResponse.json({ error: 'Session not found', code: 'SESSION_NOT_FOUND' }, { status: 404 })
+
+    // Delete reports first (no cascade on session_id in schema)
+    await prisma.$transaction([
+      prisma.report.deleteMany({ where: { session_id: sessionId } }),
+      prisma.reportSession.delete({ where: { id: sessionId } }),
+    ])
+
+    return new NextResponse(null, { status: 204 })
+  } catch (err) {
+    console.error(err)
+    return NextResponse.json({ error: 'Internal server error', code: 'INTERNAL_ERROR' }, { status: 500 })
+  }
+}

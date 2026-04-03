@@ -99,8 +99,9 @@ export async function bulkGenerateReports(
 
 export async function getBatchStatus(
   batchId: string,
-  organizationId: string
+  organizationId: string // reserved for multi-tenant isolation in future DB-backed implementation
 ): Promise<BatchStatus> {
+  void organizationId;
   const status = batchStore.get(batchId)
 
   if (!status) {
@@ -115,8 +116,9 @@ export async function getBatchStatus(
 
 export async function retryFailedJobs(
   batchId: string,
-  organizationId: string
+  organizationId: string // reserved for multi-tenant isolation in future DB-backed implementation
 ): Promise<{ requeued: number }> {
+  void organizationId;
   const status = batchStore.get(batchId)
 
   if (!status) {

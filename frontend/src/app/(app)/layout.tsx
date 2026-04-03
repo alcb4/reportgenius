@@ -52,7 +52,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
   const [mounted, setMounted] = useState(false);
 
   useEffect(() => {
-    setMounted(true);
+    void Promise.resolve().then(() => { setMounted(true); });
   }, []);
 
   useEffect(() => {

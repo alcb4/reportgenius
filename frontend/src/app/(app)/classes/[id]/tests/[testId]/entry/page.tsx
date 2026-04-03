@@ -527,9 +527,11 @@ export default function TestEntryPage() {
                 <th className="px-5 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">
                   %
                 </th>
-                <th className="px-5 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">
-                  Grade
-                </th>
+                {Object.keys(test.grade_boundaries).length > 0 && (
+                  <th className="px-5 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">
+                    Grade
+                  </th>
+                )}
                 <th className="px-5 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide">
                   Comment
                 </th>
@@ -590,10 +592,12 @@ export default function TestEntryPage() {
                       )}
                     </td>
 
-                    {/* Grade */}
-                    <td className="px-5 py-3">
-                      <GradeBadge grade={row.grade} />
-                    </td>
+                    {/* Grade — only shown when boundaries are configured */}
+                    {Object.keys(test.grade_boundaries).length > 0 && (
+                      <td className="px-5 py-3">
+                        <GradeBadge grade={row.grade} />
+                      </td>
+                    )}
 
                     {/* Comment */}
                     <td className="px-5 py-3">

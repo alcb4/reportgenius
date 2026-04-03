@@ -201,10 +201,22 @@ export async function exportSessionCSV(sessionId: string, orgId: string): Promis
     orderBy: [{ student: { first_name: 'asc' } }, { created_at: 'desc' }],
   })
 
-  const headers: (keyof ReportRow)[] = [
+  const keys: (keyof ReportRow)[] = [
     'ref_id', 'first_name', 'last_name', 'gender', 'session_name',
     'status', 'word_count', 'report_text', 'generated_at',
   ]
+
+  const columnHeaders: Record<keyof ReportRow, string> = {
+    ref_id: 'Ref ID',
+    first_name: 'First Name',
+    last_name: 'Last Name',
+    gender: 'Gender',
+    session_name: 'Session',
+    status: 'Status',
+    word_count: 'Word Count',
+    report_text: 'Report Text',
+    generated_at: 'Generated At',
+  }
 
   const rows: ReportRow[] = reports.map((r) => ({
     ref_id: r.student.student_ref_id ?? '',
@@ -222,14 +234,14 @@ export async function exportSessionCSV(sessionId: string, orgId: string): Promis
   const worksheet = workbook.addWorksheet('Reports')
 
   const colWidths = [14, 18, 18, 10, 30, 10, 12, 60, 24]
-  worksheet.columns = headers.map((key, i) => ({
-    header: key,
+  worksheet.columns = keys.map((key, i) => ({
+    header: columnHeaders[key],
     key,
     width: colWidths[i] ?? 15,
   }))
 
   for (const row of rows) {
-    worksheet.addRow(headers.map((h) => row[h]))
+    worksheet.addRow(keys.map((k) => row[k]))
   }
 
   const raw = await workbook.xlsx.writeBuffer()

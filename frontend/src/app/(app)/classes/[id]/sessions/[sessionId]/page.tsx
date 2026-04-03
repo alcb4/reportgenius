@@ -54,6 +54,12 @@ import RatingsGrid, {
   GridReport,
 } from "@/components/RatingsGrid";
 import GenerateReportsPanel from "@/components/GenerateReportsPanel";
+import CompactFilterBar, {
+  FilterBarSession,
+  FilterBarPatch,
+  ClassTest as FilterBarClassTest,
+  ProgressionData as FilterBarProgressionData,
+} from "@/components/CompactFilterBar";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -84,6 +90,8 @@ interface SessionDetail {
   source_template_id: string | null;
   test_filters: Record<string, TestFilterState> | null;
   progression_filters: string[];
+  enable_progression: boolean;
+  allow_negative_progression: boolean;
   class_overview: string | null;
   created_at: string;
   updated_at: string;
@@ -126,6 +134,324 @@ interface ClassMeta {
 
 interface ClassDetailResponse {
   data: ClassMeta;
+}
+
+interface OrgClass {
+  id: string;
+  name: string;
+  year_group: string | null;
+  subject: string | null;
+  archived: boolean;
+  _count: { students: number; sessions: number };
+}
+
+interface ClassesListResponse {
+  data: OrgClass[];
+}
+
+// ── DuplicateToClassModal ─────────────────────────────────────────────────────
+
+function DuplicateToClassModal({
+  sessionName,
+  currentClassId,
+  onConfirm,
+  onCancel,
+}: {
+  sessionName: string;
+  currentClassId: string;
+  onConfirm: (targetClassId: string, targetClassName: string) => void;
+  onCancel: () => void;
+}) {
+  const [classes, setClasses] = useState<OrgClass[]>([]);
+  const [loadingClasses, setLoadingClasses] = useState(true);
+  const [fetchError, setFetchError] = useState<string | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function fetchClasses() {
+      try {
+        const result = await apiFetch<ClassesListResponse>("/api/v1/classes");
+        if (!cancelled) {
+          // Show non-archived classes; keep current class in the list
+          setClasses(result.data.filter((c) => !c.archived));
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setFetchError(
+            err instanceof APIError ? err.message : "Failed to load classes."
+          );
+        }
+      } finally {
+        if (!cancelled) setLoadingClasses(false);
+      }
+    }
+    fetchClasses();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const selectedClass = classes.find((c) => c.id === selectedId) ?? null;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+      <div className="bg-white rounded-xl shadow-xl w-full max-w-lg mx-4 flex flex-col max-h-[80vh]">
+        {/* Header */}
+        <div className="px-6 pt-6 pb-4 border-b border-gray-100">
+          <h2 className="text-base font-semibold text-gray-900">
+            Duplicate Session
+          </h2>
+          <p className="text-sm text-gray-500 mt-0.5">
+            Copying &ldquo;{sessionName}&rdquo;
+          </p>
+        </div>
+
+        {/* Class list */}
+        <div className="flex-1 overflow-y-auto px-6 py-3">
+          {loadingClasses && (
+            <div className="space-y-2 animate-pulse py-2">
+              {[1, 2, 3].map((n) => (
+                <div key={n} className="h-12 bg-gray-100 rounded-md" />
+              ))}
+            </div>
+          )}
+          {fetchError && (
+            <p className="text-sm text-red-600 py-3">{fetchError}</p>
+          )}
+          {!loadingClasses && !fetchError && classes.length === 0 && (
+            <p className="text-sm text-gray-400 py-3">No classes found.</p>
+          )}
+          {!loadingClasses && !fetchError && classes.length > 0 && (
+            <ul className="space-y-1">
+              {classes.map((cls) => {
+                const isCurrentClass = cls.id === currentClassId;
+                const isSelected = cls.id === selectedId;
+                return (
+                  <li key={cls.id}>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedId(cls.id)}
+                      className={`w-full text-left px-4 py-3 rounded-lg border transition ${
+                        isSelected
+                          ? "border-indigo-500 bg-indigo-50 ring-1 ring-indigo-500"
+                          : "border-gray-200 hover:bg-gray-50"
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex-1 min-w-0">
+                          <span className="text-sm font-medium text-gray-900 truncate">
+                            {cls.name}
+                          </span>
+                          {isCurrentClass && (
+                            <span className="ml-2 text-xs text-indigo-500 font-medium">
+                              (this class)
+                            </span>
+                          )}
+                          <div className="flex items-center gap-2 mt-0.5 text-xs text-gray-400">
+                            {cls.year_group && (
+                              <span>Year {cls.year_group}</span>
+                            )}
+                            {cls.year_group && cls.subject && (
+                              <span>·</span>
+                            )}
+                            {cls.subject && <span>{cls.subject}</span>}
+                          </div>
+                        </div>
+                        <span className="text-xs text-gray-400 whitespace-nowrap">
+                          {cls._count.students}{" "}
+                          {cls._count.students === 1 ? "student" : "students"}
+                        </span>
+                      </div>
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div className="px-6 py-4 border-t border-gray-100 flex justify-end gap-3">
+          <button
+            type="button"
+            onClick={onCancel}
+            className="px-4 py-2 rounded-md border border-gray-300 text-sm font-medium text-gray-700 hover:bg-gray-50 transition"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              if (selectedClass) onConfirm(selectedClass.id, selectedClass.name);
+            }}
+            disabled={!selectedId}
+            className="px-4 py-2 rounded-md bg-indigo-600 text-sm font-semibold text-white hover:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed transition"
+          >
+            {selectedClass
+              ? `Duplicate to ${selectedClass.name}`
+              : "Duplicate to \u2026"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── EditSessionModal ──────────────────────────────────────────────────────────
+
+function EditSessionModal({
+  session,
+  reportCount,
+  onSave,
+  onCancel,
+  onRequestDelete,
+}: {
+  session: SessionDetail;
+  reportCount: number;
+  onSave: (name: string) => Promise<void>;
+  onCancel: () => void;
+  onRequestDelete: () => void;
+}) {
+  const [name, setName] = useState(session.name);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function handleSave() {
+    const trimmed = name.trim();
+    if (!trimmed) {
+      setError("Session name is required.");
+      return;
+    }
+    setError(null);
+    setSaving(true);
+    try {
+      await onSave(trimmed);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to save changes.");
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+      <div className="bg-white rounded-xl shadow-xl w-full max-w-sm mx-4 flex flex-col">
+        {/* Header */}
+        <div className="px-6 pt-6 pb-4 border-b border-gray-100">
+          <h2 className="text-base font-semibold text-gray-900">Edit Session</h2>
+        </div>
+
+        {/* Body */}
+        <div className="px-6 py-5 space-y-4">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1.5">
+              Session name <span className="text-red-500">*</span>
+            </label>
+            <input
+              type="text"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  handleSave();
+                }
+              }}
+              autoFocus
+              className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none transition"
+            />
+            {error && <p className="mt-1.5 text-sm text-red-600">{error}</p>}
+          </div>
+        </div>
+
+        {/* Footer buttons */}
+        <div className="px-6 pb-4 flex justify-end gap-3">
+          <button
+            type="button"
+            onClick={onCancel}
+            className="px-4 py-2 rounded-md border border-gray-300 text-sm font-medium text-gray-700 hover:bg-gray-50 transition"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={handleSave}
+            disabled={saving || !name.trim()}
+            className="px-4 py-2 rounded-md bg-indigo-600 text-sm font-semibold text-white hover:bg-indigo-700 disabled:opacity-50 transition"
+          >
+            {saving ? "Saving..." : "Save Changes"}
+          </button>
+        </div>
+
+        {/* Danger zone */}
+        <div className="px-6 py-4 border-t border-gray-200 bg-gray-50 rounded-b-xl">
+          <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">
+            Danger Zone
+          </p>
+          <button
+            type="button"
+            onClick={onRequestDelete}
+            className="w-full px-4 py-2 rounded-md border border-red-300 text-sm font-medium text-red-600 hover:bg-red-50 transition"
+          >
+            Delete Session
+          </button>
+          <p className="mt-1.5 text-xs text-gray-400">
+            Permanently deletes this session and all {reportCount}{" "}
+            {reportCount === 1 ? "report" : "reports"}.
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── DeleteSessionConfirmModal ─────────────────────────────────────────────────
+
+function DeleteSessionConfirmModal({
+  sessionName,
+  reportCount,
+  deleting,
+  onConfirm,
+  onCancel,
+}: {
+  sessionName: string;
+  reportCount: number;
+  deleting: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
+      <div className="bg-white rounded-xl shadow-xl p-6 max-w-sm w-full mx-4">
+        <h2 className="text-base font-semibold text-gray-900 mb-3">
+          Delete Session?
+        </h2>
+        <p className="text-sm text-gray-600 mb-6">
+          This will permanently delete &ldquo;{sessionName}&rdquo; and all{" "}
+          {reportCount} {reportCount === 1 ? "report" : "reports"}. This cannot
+          be undone.
+        </p>
+        <div className="flex justify-end gap-3">
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={deleting}
+            className="px-4 py-2 rounded-md border border-gray-300 text-sm font-medium text-gray-700 hover:bg-gray-50 transition disabled:opacity-50"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={onConfirm}
+            disabled={deleting}
+            className="px-4 py-2 rounded-md bg-red-600 text-sm font-semibold text-white hover:bg-red-700 disabled:opacity-50 transition"
+          >
+            {deleting ? "Deleting..." : "Delete Session"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 interface RatingsResponse {
@@ -479,321 +805,6 @@ function ReportsTab({
   );
 }
 
-// ── Filter Panel (inside Ratings tab) ─────────────────────────────────────────
-
-function FilterPanel({
-  session,
-  disciplines,
-  classTests,
-  progressionData,
-  onSave,
-}: {
-  session: SessionDetail;
-  disciplines: Discipline[];
-  classTests: ClassTest[];
-  progressionData: ProgressionData | null;
-  onSave: (patch: Partial<Pick<SessionDetail, "tone" | "test_filters" | "progression_filters" | "class_overview">>) => void;
-}) {
-  // Tone — initialized from session, updated immediately on change
-  const [tone, setTone] = useState<string>(session.tone);
-
-  // Discipline checkboxes — which disciplines are "included" for generation
-  // (stored as a Set of discipline IDs, default: all checked)
-  const [includedDisciplineIds, setIncludedDisciplineIds] = useState<Set<string>>(
-    () => new Set(disciplines.map((d) => d.id))
-  );
-
-  // Test filter state — per test, which aspects to include
-  const [testFilters, setTestFilters] = useState<Record<string, TestFilterState>>(() => {
-    const saved = session.test_filters ?? {};
-    const result: Record<string, TestFilterState> = {};
-    for (const test of classTests) {
-      result[test.id] = saved[test.id] ?? {
-        includeMark: false,
-        includePercentage: false,
-        includeGrade: false,
-        includeLowMention: false,
-      };
-    }
-    return result;
-  });
-
-  // Progression filter — which discipline names are included
-  const [includedProgressionItems, setIncludedProgressionItems] = useState<Set<string>>(
-    () => new Set(session.progression_filters ?? [])
-  );
-
-  // Class overview textarea
-  const [classOverview, setClassOverview] = useState<string>(session.class_overview ?? "");
-
-  // Sync tone from session if it changes externally
-  useEffect(() => { setTone(session.tone); }, [session.tone]);
-
-  // Debounce ref for overview saves
-  const overviewTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  function handleToneChange(newTone: string) {
-    setTone(newTone);
-    onSave({ tone: newTone });
-  }
-
-  function handleTestFilterChange(testId: string, field: keyof TestFilterState, value: boolean) {
-    const updated = {
-      ...testFilters,
-      [testId]: { ...(testFilters[testId] ?? { includeMark: false, includePercentage: false, includeGrade: false, includeLowMention: false }), [field]: value },
-    };
-    setTestFilters(updated);
-    onSave({ test_filters: updated });
-  }
-
-  function toggleProgressionItem(name: string) {
-    setIncludedProgressionItems((prev) => {
-      const next = new Set(prev);
-      if (next.has(name)) next.delete(name);
-      else next.add(name);
-      const arr = Array.from(next);
-      onSave({ progression_filters: arr });
-      return next;
-    });
-  }
-
-  function handleOverviewChange(val: string) {
-    setClassOverview(val);
-    if (overviewTimerRef.current) clearTimeout(overviewTimerRef.current);
-    overviewTimerRef.current = setTimeout(() => {
-      onSave({ class_overview: val.trim() || null });
-    }, 600);
-  }
-
-  const hasTests = classTests.length > 0;
-  const hasProgression =
-    progressionData !== null &&
-    progressionData.previousSession !== null &&
-    progressionData.matchedDisciplines.length > 0;
-
-  return (
-    <div className="space-y-4 mb-4">
-      {/* Tone + Disciplines row */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        {/* Tone selector */}
-        <div className="bg-white rounded-lg border border-gray-200 shadow-sm px-5 py-4">
-          <h2 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">
-            Report Tone
-          </h2>
-          <div className="flex gap-2">
-            {(["gentle", "balanced", "direct"] as const).map((t) => {
-              const isActive = tone === t;
-              return (
-                <button
-                  key={t}
-                  onClick={() => handleToneChange(t)}
-                  className={`flex-1 py-2 rounded-lg border text-sm font-medium capitalize transition ${
-                    isActive
-                      ? "border-indigo-500 bg-indigo-50 text-indigo-700"
-                      : "border-gray-200 text-gray-400 hover:border-gray-300 hover:text-gray-600"
-                  }`}
-                >
-                  {t}
-                  {isActive && session.tone === t && tone === session.tone && (
-                    <span className="ml-1 text-xs text-gray-400">(saved)</span>
-                  )}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-
-        {/* Disciplines checkboxes */}
-        <div className="bg-white rounded-lg border border-gray-200 shadow-sm px-5 py-4">
-          <div className="flex items-center justify-between mb-3">
-            <h2 className="text-xs font-semibold text-gray-500 uppercase tracking-wide">
-              Disciplines in reports
-            </h2>
-            <div className="flex gap-3 text-xs text-gray-400">
-              <button
-                onClick={() => setIncludedDisciplineIds(new Set(disciplines.map((d) => d.id)))}
-                className="hover:text-indigo-600 transition font-medium"
-              >
-                All
-              </button>
-              <button
-                onClick={() => setIncludedDisciplineIds(new Set())}
-                className="hover:text-gray-600 transition"
-              >
-                None
-              </button>
-            </div>
-          </div>
-          {disciplines.length === 0 ? (
-            <p className="text-xs text-gray-400">No disciplines yet.</p>
-          ) : (
-            <div className="flex flex-wrap gap-1.5">
-              {disciplines.map((d) => {
-                const checked = includedDisciplineIds.has(d.id);
-                return (
-                  <button
-                    key={d.id}
-                    onClick={() => {
-                      setIncludedDisciplineIds((prev) => {
-                        const next = new Set(prev);
-                        if (next.has(d.id)) next.delete(d.id);
-                        else next.add(d.id);
-                        return next;
-                      });
-                    }}
-                    className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium border transition ${
-                      checked
-                        ? "border-indigo-400 bg-indigo-50 text-indigo-700"
-                        : "border-gray-200 bg-white text-gray-400 hover:border-gray-300"
-                    }`}
-                  >
-                    {checked && (
-                      <svg className="w-3 h-3 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
-                      </svg>
-                    )}
-                    {d.name}
-                  </button>
-                );
-              })}
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* Tests filter card */}
-      {hasTests && (
-        <div className="bg-white rounded-lg border border-gray-200 shadow-sm px-5 py-4">
-          <h2 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-3">
-            Tests — include in reports
-          </h2>
-          <div className="space-y-3">
-            {classTests.map((test) => {
-              const tf = testFilters[test.id] ?? { includeMark: false, includePercentage: false, includeGrade: false, includeLowMention: false };
-              const anyOn = tf.includeMark || tf.includePercentage || tf.includeGrade || tf.includeLowMention;
-              return (
-                <div
-                  key={test.id}
-                  className={`rounded-lg border p-3 transition ${
-                    anyOn ? "border-indigo-200 bg-indigo-50/40" : "border-gray-100"
-                  }`}
-                >
-                  <div className="text-sm font-medium text-gray-800 mb-2">
-                    {test.name}
-                    <span className="ml-2 text-xs text-gray-400">/{test.max_mark} marks</span>
-                  </div>
-                  <div className="flex flex-wrap gap-3">
-                    {(
-                      [
-                        { key: "includeMark" as const, label: "Mark" },
-                        { key: "includePercentage" as const, label: "Percentage" },
-                        { key: "includeGrade" as const, label: "Grade" },
-                        { key: "includeLowMention" as const, label: "Low score note" },
-                      ] as const
-                    ).map(({ key, label }) => (
-                      <label key={key} className="flex items-center gap-1.5 cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={tf[key]}
-                          onChange={(e) => handleTestFilterChange(test.id, key, e.target.checked)}
-                          className="accent-indigo-600 w-3.5 h-3.5"
-                        />
-                        <span className="text-xs text-gray-600">{label}</span>
-                      </label>
-                    ))}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
-
-      {/* Historical Progression card */}
-      {hasProgression && (
-        <div className="bg-white rounded-lg border border-gray-200 shadow-sm px-5 py-4">
-          <div className="flex items-center justify-between mb-3">
-            <div>
-              <h2 className="text-xs font-semibold text-gray-500 uppercase tracking-wide">
-                Historical Progression
-              </h2>
-              <p className="text-xs text-gray-400 mt-0.5">
-                vs. {progressionData!.previousSession!.name}
-              </p>
-            </div>
-            <div className="flex gap-3 text-xs text-gray-400">
-              <button
-                onClick={() => {
-                  const all = progressionData!.matchedDisciplines.map((d) => d.name);
-                  setIncludedProgressionItems(new Set(all));
-                  onSave({ progression_filters: all });
-                }}
-                className="hover:text-indigo-600 transition font-medium"
-              >
-                All
-              </button>
-              <button
-                onClick={() => {
-                  setIncludedProgressionItems(new Set());
-                  onSave({ progression_filters: [] });
-                }}
-                className="hover:text-gray-600 transition"
-              >
-                None
-              </button>
-            </div>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            {progressionData!.matchedDisciplines.map((disc) => {
-              const isIncluded = includedProgressionItems.has(disc.name);
-              const trendColor =
-                disc.trend === "improved"
-                  ? "text-green-600"
-                  : disc.trend === "declined"
-                  ? "text-red-500"
-                  : "text-gray-400";
-              const trendIcon =
-                disc.trend === "improved" ? "↑" : disc.trend === "declined" ? "↓" : "=";
-              return (
-                <button
-                  key={disc.name}
-                  onClick={() => toggleProgressionItem(disc.name)}
-                  className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-xs font-medium transition ${
-                    isIncluded
-                      ? "border-indigo-400 bg-indigo-50 text-indigo-700"
-                      : "border-gray-200 text-gray-400 hover:border-gray-300"
-                  }`}
-                >
-                  {disc.name}
-                  <span className={`${trendColor} font-bold`}>{trendIcon}</span>
-                  <span className="text-gray-300">{disc.previousScore}&rarr;{disc.currentScore}</span>
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      )}
-
-      {/* Class Overview textarea */}
-      <div className="bg-white rounded-lg border border-gray-200 shadow-sm px-5 py-4">
-        <label className="block text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">
-          Class Overview
-        </label>
-        <p className="text-xs text-gray-400 mb-2">
-          Context injected into all reports for this session. Describe the class&apos;s overall progress, notable themes, or shared experiences.
-        </p>
-        <textarea
-          value={classOverview}
-          onChange={(e) => handleOverviewChange(e.target.value)}
-          rows={3}
-          placeholder="The class showed strong engagement with the poetry unit this term, particularly in creative expression..."
-          className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm text-gray-800 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none transition resize-none"
-        />
-      </div>
-    </div>
-  );
-}
-
 // ── Main page ─────────────────────────────────────────────────────────────────
 
 export default function SessionDetailPage() {
@@ -826,8 +837,15 @@ export default function SessionDetailPage() {
   const [showAddDiscipline, setShowAddDiscipline] = useState(false);
   const [statusUpdating, setStatusUpdating] = useState(false);
   const [duplicating, setDuplicating] = useState(false);
+  const [showDuplicateModal, setShowDuplicateModal] = useState(false);
   const [showStatusConfirm, setShowStatusConfirm] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const [successToast, setSuccessToast] = useState<string | null>(null);
+
+  // Edit / Delete modal state
+  const [showEditModal, setShowEditModal] = useState(false);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   // Tests (class-level)
   const [classTests, setClassTests] = useState<ClassTest[]>([]);
@@ -938,7 +956,7 @@ export default function SessionDetailPage() {
   const filterSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const handleFilterSave = useCallback(
-    (patch: Partial<Pick<SessionDetail, "tone" | "test_filters" | "progression_filters" | "class_overview">>) => {
+    (patch: FilterBarPatch) => {
       // Optimistically update session state so derived UI is consistent
       setSession((prev) => (prev ? { ...prev, ...patch } : prev));
 
@@ -1022,7 +1040,8 @@ export default function SessionDetailPage() {
 
   // ── Duplicate ──────────────────────────────────────────────────────────────
 
-  async function handleDuplicate() {
+  async function handleDuplicateConfirm(targetClassId: string, targetClassName: string) {
+    setShowDuplicateModal(false);
     setDuplicating(true);
     try {
       interface DuplicateResponse {
@@ -1030,8 +1049,10 @@ export default function SessionDetailPage() {
       }
       const result = await apiFetch<DuplicateResponse>(
         `/api/v1/sessions/${sessionId}/duplicate`,
-        { method: "POST" }
+        { method: "POST", body: { targetClassId } }
       );
+      setSuccessToast(`Session duplicated to ${targetClassName}.`);
+      setTimeout(() => setSuccessToast(null), 4000);
       router.push(
         `/classes/${result.data.class_id}/sessions/${result.data.id}`
       );
@@ -1040,6 +1061,40 @@ export default function SessionDetailPage() {
         err instanceof APIError ? err.message : "Failed to duplicate session."
       );
       setDuplicating(false);
+    }
+  }
+
+  // ── Edit session name ──────────────────────────────────────────────────────
+
+  async function handleSaveSessionName(newName: string) {
+    try {
+      interface UpdateSessionResponse {
+        data: SessionDetail;
+      }
+      const result = await apiFetch<UpdateSessionResponse>(
+        `/api/v1/sessions/${sessionId}`,
+        { method: "PUT", body: { name: newName } }
+      );
+      setSession(result.data);
+      setShowEditModal(false);
+    } catch (err) {
+      throw err instanceof APIError ? err : new Error("Failed to save changes.");
+    }
+  }
+
+  // ── Delete session ─────────────────────────────────────────────────────────
+
+  async function handleDeleteSession() {
+    setDeleting(true);
+    try {
+      await apiFetch(`/api/v1/sessions/${sessionId}`, { method: "DELETE" });
+      router.push(`/classes/${classId}`);
+    } catch (err) {
+      setActionError(
+        err instanceof APIError ? err.message : "Failed to delete session."
+      );
+      setDeleting(false);
+      setShowDeleteConfirm(false);
     }
   }
 
@@ -1071,10 +1126,9 @@ export default function SessionDetailPage() {
         .join(" — ")
     : "";
 
-  const API_URL =
-    typeof window !== "undefined"
-      ? (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001")
-      : "http://localhost:3001";
+  // Use empty-string base so all export URLs are relative (same-origin).
+  // This avoids CSP violations from calling the Express backend on port 3001 directly.
+  const API_URL = "";
 
   return (
     <div className="w-full space-y-6">
@@ -1097,6 +1151,45 @@ export default function SessionDetailPage() {
           onConfirm={() => handleStatusChange(showStatusConfirm)}
           onCancel={() => setShowStatusConfirm(null)}
         />
+      )}
+      {showDuplicateModal && session && (
+        <DuplicateToClassModal
+          sessionName={session.name}
+          currentClassId={classId}
+          onConfirm={handleDuplicateConfirm}
+          onCancel={() => setShowDuplicateModal(false)}
+        />
+      )}
+      {showEditModal && session && (
+        <EditSessionModal
+          session={session}
+          reportCount={reports.size}
+          onSave={handleSaveSessionName}
+          onCancel={() => setShowEditModal(false)}
+          onRequestDelete={() => {
+            setShowEditModal(false);
+            setShowDeleteConfirm(true);
+          }}
+        />
+      )}
+      {showDeleteConfirm && session && (
+        <DeleteSessionConfirmModal
+          sessionName={session.name}
+          reportCount={reports.size}
+          deleting={deleting}
+          onConfirm={handleDeleteSession}
+          onCancel={() => setShowDeleteConfirm(false)}
+        />
+      )}
+
+      {/* Success toast */}
+      {successToast && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 bg-gray-900 text-white text-sm font-medium px-5 py-3 rounded-lg shadow-lg flex items-center gap-3">
+          <svg className="w-4 h-4 text-green-400 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+          </svg>
+          {successToast}
+        </div>
       )}
 
       {/* Breadcrumb */}
@@ -1163,11 +1256,17 @@ export default function SessionDetailPage() {
             </button>
           )}
           <button
-            onClick={handleDuplicate}
+            onClick={() => setShowDuplicateModal(true)}
             disabled={duplicating}
             className="px-3 py-1.5 rounded-md border border-gray-300 text-sm font-medium text-gray-700 hover:bg-gray-50 transition disabled:opacity-50"
           >
             {duplicating ? "Duplicating..." : "Duplicate Session"}
+          </button>
+          <button
+            onClick={() => setShowEditModal(true)}
+            className="px-3 py-1.5 rounded-md border border-gray-300 text-sm font-medium text-gray-700 hover:bg-gray-50 transition"
+          >
+            Edit
           </button>
         </div>
       </div>
@@ -1226,30 +1325,17 @@ export default function SessionDetailPage() {
         </button>
       </div>
 
-      {/* Ratings tab — filter panel above grid */}
+      {/* Ratings tab — compact filter bar above grid */}
       {activeTab === "ratings" && (
         <div className="w-full space-y-4">
-          {/* Add discipline button above filters */}
-          <div className="flex items-center justify-between">
-            <p className="text-xs text-gray-400">
-              Configure session filters, then enter ratings below.
-            </p>
-            {!isComplete && (
-              <button
-                onClick={() => setShowAddDiscipline(true)}
-                className="text-xs text-indigo-600 hover:text-indigo-800 font-medium transition"
-              >
-                + Add Discipline
-              </button>
-            )}
-          </div>
-
-          <FilterPanel
-            session={session}
+          <CompactFilterBar
+            session={session as unknown as FilterBarSession}
             disciplines={disciplines}
-            classTests={classTests}
-            progressionData={progressionData}
+            classTests={classTests as FilterBarClassTest[]}
+            progressionData={progressionData as FilterBarProgressionData | null}
             onSave={handleFilterSave}
+            onAddDiscipline={isComplete ? undefined : () => setShowAddDiscipline(true)}
+            isReadOnly={isComplete}
           />
 
           <RatingsGrid

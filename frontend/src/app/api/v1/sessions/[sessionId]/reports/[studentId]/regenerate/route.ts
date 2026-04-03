@@ -3,8 +3,8 @@ import { z } from 'zod'
 import { prisma } from '@/lib/prisma'
 import { authenticate } from '@/lib/authenticate'
 import { createLLMAdapter } from '@/lib/adapters/llm/factory'
-import { formatRatingSummary, buildPrompt } from '@/lib/adapters/llm/prompt-builder'
-import { ReportLength, ProgressionItem, TestContextItem } from '@/lib/adapters/llm/types'
+import { buildPrompt, resolveTestInstructionFromConfig } from '@/lib/adapters/llm/prompt-builder'
+import { ReportLength, RawRating, ProgressionItem, TestContextItem } from '@/lib/adapters/llm/types'
 import { decryptApiKey } from '@/lib/encryption'
 import { rateLimitOrNull } from '@/lib/ratelimit'
 
@@ -57,7 +57,6 @@ export async function POST(
       progression_filters: true,
       test_filters: true,
       disciplines: { select: { id: true, name: true }, orderBy: { created_at: 'asc' } },
-      tests: { select: { id: true, name: true } },
     },
   })
   if (!session) return NextResponse.json({ error: 'Session not found', code: 'SESSION_NOT_FOUND' }, { status: 404 })
@@ -105,9 +104,11 @@ export async function POST(
       )
     }
 
-    const ratingSummary = formatRatingSummary(
-      ratings.map((r) => ({ disciplineName: r.session_discipline.name, score: r.score, comment: r.comment }))
-    )
+    const rawRatings: RawRating[] = ratings.map((r) => ({
+      name: r.session_discipline.name,
+      score: r.score,
+      comment: r.comment,
+    }))
 
     const topicRatingRows = await prisma.topicRating.findMany({
       where: { session_id: sessionId, student_id: studentId, organization_id: user.organizationId },
@@ -121,31 +122,60 @@ export async function POST(
 
     // Build test context
     const testFilters = (session.test_filters ?? {}) as Record<string, {
-      includeMark: boolean; includePercentage: boolean; includeGrade: boolean; includeLowMention: boolean
+      includeMark?: boolean
+      includePercentage?: boolean
+      includeGrade?: boolean
+      includeLowMention?: boolean
     }>
-    const relevantTestIds = (session.tests ?? [])
-      .filter((t) => { const f = testFilters[t.id]; return f && (f.includePercentage || f.includeGrade || f.includeLowMention) })
+
+    // Derive included test IDs from test_filters keys (tests may be class-level with no session_id,
+    // so we query by ID directly rather than relying on the session→tests Prisma relation).
+    const configuredTestIds = Object.keys(testFilters)
+    const allIncludedTests = configuredTestIds.length > 0
+      ? await prisma.test.findMany({
+          where: { id: { in: configuredTestIds }, class_id: session.class_id },
+          select: { id: true, name: true, max_mark: true },
+        })
+      : []
+
+    const testInstruction = resolveTestInstructionFromConfig(
+      testFilters,
+      allIncludedTests.map((t) => t.id)
+    )
+
+    const scoredTestIds = allIncludedTests
+      .filter((t) => {
+        const f = testFilters[t.id]
+        return f && (f.includePercentage || f.includeGrade || f.includeLowMention || f.includeMark)
+      })
       .map((t) => t.id)
 
     let testContext: TestContextItem[] | undefined
-    if (relevantTestIds.length > 0) {
-      const testResults = await prisma.testResult.findMany({
-        where: { test_id: { in: relevantTestIds }, student_id: studentId },
-        select: { test_id: true, calculated: true },
-      })
+    if (allIncludedTests.length > 0) {
+      const testResults = scoredTestIds.length > 0
+        ? await prisma.testResult.findMany({
+            where: { test_id: { in: scoredTestIds }, student_id: studentId },
+            select: { test_id: true, score: true, calculated: true },
+          })
+        : []
       const resultByTestId = new Map(testResults.map((r) => [r.test_id, r]))
       const items: TestContextItem[] = []
-      for (const test of session.tests ?? []) {
+      for (const test of allIncludedTests) {
         const filter = testFilters[test.id]
-        if (!filter) continue
-        const result = resultByTestId.get(test.id)
-        if (!result) continue
-        const calc = result.calculated as { percentage: number; grade: string | null }
-        const item: TestContextItem = { testName: test.name }
-        if (filter.includePercentage) item.percentage = calc.percentage
-        if (filter.includeGrade) item.grade = calc.grade
-        if (filter.includeLowMention) item.lowMention = true
-        items.push(item)
+        const isScored = filter.includePercentage || filter.includeGrade || filter.includeLowMention || filter.includeMark
+        if (isScored) {
+          const result = resultByTestId.get(test.id)
+          if (!result) continue
+          const calc = result.calculated as { percentage: number; grade: string | null }
+          const item: TestContextItem = { testName: test.name }
+          if (filter.includePercentage || filter.includeLowMention) item.percentage = calc.percentage
+          if (filter.includeGrade) item.grade = calc.grade
+          if (filter.includeLowMention) item.lowMention = true
+          if (filter.includeMark) item.mark = `${result.score}/${test.max_mark}`
+          items.push(item)
+        } else {
+          items.push({ testName: test.name })
+        }
       }
       if (items.length > 0) testContext = items
     }
@@ -191,20 +221,24 @@ export async function POST(
     const overviewNote = filters?.overviewSummary?.trim() ?? (session.class_overview?.trim() || undefined)
     const customNoteText = customNote?.trim()
 
-    let ratingSummaryWithNote = ratingSummary
-    if (overviewNote) ratingSummaryWithNote += ` (class context: ${overviewNote})`
-    if (customNoteText) ratingSummaryWithNote += ` (additional context: ${customNoteText})`
+    // Compose context note from optional overview + custom note
+    const contextParts: string[] = []
+    if (overviewNote) contextParts.push(`Class context: ${overviewNote}`)
+    if (customNoteText) contextParts.push(`Additional context: ${customNoteText}`)
+    const contextNote = contextParts.length > 0 ? contextParts.join(' — ') : undefined
 
     const reportPrompt = {
       firstName: student.first_name,
       gender: student.gender ?? 'unspecified',
-      ratingSummary: ratingSummaryWithNote,
+      ratings: rawRatings,
       topics: session.topics_covered,
       tone: effectiveTone,
       length: effectiveLength,
       topicRatings,
       progression,
       testContext,
+      testInstruction,
+      contextNote,
     }
 
     const promptText = buildPrompt(reportPrompt)

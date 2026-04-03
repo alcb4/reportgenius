@@ -8,8 +8,6 @@ interface CreateClassResponse {
   data: { id: string };
 }
 
-const DEFAULT_DISCIPLINES = ["Behaviour", "Homework", "Participation", "Progress"];
-
 export default function NewClassPage() {
   const router = useRouter();
 
@@ -22,13 +20,6 @@ export default function NewClassPage() {
   // Topics tag input
   const [topicInput, setTopicInput] = useState("");
   const [topics, setTopics] = useState<string[]>([]);
-
-  // Disciplines — defaults checked, custom additions allowed
-  const [defaultChecked, setDefaultChecked] = useState<Record<string, boolean>>(
-    Object.fromEntries(DEFAULT_DISCIPLINES.map((d) => [d, true]))
-  );
-  const [customDisciplines, setCustomDisciplines] = useState<string[]>([]);
-  const [customDisciplineInput, setCustomDisciplineInput] = useState("");
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -54,51 +45,11 @@ export default function NewClassPage() {
     setTopics((prev) => prev.filter((t) => t !== topic));
   }
 
-  // ── Discipline helpers ─────────────────────────────────────────────────────
-
-  function toggleDefault(name: string) {
-    setDefaultChecked((prev) => ({ ...prev, [name]: !prev[name] }));
-  }
-
-  function addCustomDiscipline() {
-    const trimmed = customDisciplineInput.trim();
-    if (
-      trimmed &&
-      !customDisciplines.includes(trimmed) &&
-      !DEFAULT_DISCIPLINES.includes(trimmed)
-    ) {
-      setCustomDisciplines((prev) => [...prev, trimmed]);
-    }
-    setCustomDisciplineInput("");
-  }
-
-  function handleCustomDisciplineKeyDown(e: KeyboardEvent<HTMLInputElement>) {
-    if (e.key === "Enter") {
-      e.preventDefault();
-      addCustomDiscipline();
-    }
-  }
-
-  function removeCustomDiscipline(name: string) {
-    setCustomDisciplines((prev) => prev.filter((d) => d !== name));
-  }
-
   // ── Submit ─────────────────────────────────────────────────────────────────
 
   async function handleSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
     setError(null);
-
-    const selectedDisciplines = [
-      ...DEFAULT_DISCIPLINES.filter((d) => defaultChecked[d]),
-      ...customDisciplines,
-    ].map((name) => ({ name }));
-
-    if (selectedDisciplines.length === 0) {
-      setError("Please select at least one discipline.");
-      return;
-    }
-
     setLoading(true);
 
     try {
@@ -110,7 +61,6 @@ export default function NewClassPage() {
           subject: subject || undefined,
           term: term || undefined,
           topics_covered: topics,
-          disciplines: selectedDisciplines,
         },
       });
       router.push(`/classes/${result.data.id}`);
@@ -246,78 +196,6 @@ export default function NewClassPage() {
               ))}
             </div>
           )}
-        </div>
-
-        {/* Disciplines */}
-        <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6 space-y-4">
-          <h2 className="text-sm font-semibold text-gray-700 uppercase tracking-wide">
-            Disciplines
-          </h2>
-          <p className="text-xs text-gray-500">
-            Select the areas that will be rated for each student.
-          </p>
-
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-            {DEFAULT_DISCIPLINES.map((disc) => (
-              <label
-                key={disc}
-                className={`flex items-center gap-2 p-3 rounded-lg border cursor-pointer transition ${
-                  defaultChecked[disc]
-                    ? "border-indigo-500 bg-indigo-50"
-                    : "border-gray-200 bg-white hover:border-gray-300"
-                }`}
-              >
-                <input
-                  type="checkbox"
-                  checked={defaultChecked[disc] ?? false}
-                  onChange={() => toggleDefault(disc)}
-                  className="accent-indigo-600 w-4 h-4"
-                />
-                <span className="text-sm font-medium text-gray-700">{disc}</span>
-              </label>
-            ))}
-          </div>
-
-          {customDisciplines.length > 0 && (
-            <div className="flex flex-wrap gap-2">
-              {customDisciplines.map((disc) => (
-                <span
-                  key={disc}
-                  className="inline-flex items-center gap-1.5 bg-gray-100 text-gray-700 text-sm px-3 py-1 rounded-full"
-                >
-                  {disc}
-                  <button
-                    type="button"
-                    onClick={() => removeCustomDiscipline(disc)}
-                    className="text-gray-400 hover:text-gray-700 transition"
-                    aria-label={`Remove discipline ${disc}`}
-                  >
-                    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-                    </svg>
-                  </button>
-                </span>
-              ))}
-            </div>
-          )}
-
-          <div className="flex gap-2">
-            <input
-              type="text"
-              value={customDisciplineInput}
-              onChange={(e) => setCustomDisciplineInput(e.target.value)}
-              onKeyDown={handleCustomDisciplineKeyDown}
-              className="flex-1 rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none transition"
-              placeholder="Add custom discipline"
-            />
-            <button
-              type="button"
-              onClick={addCustomDiscipline}
-              className="px-3 py-2 rounded-md bg-gray-100 text-sm font-medium text-gray-700 hover:bg-gray-200 transition"
-            >
-              Add
-            </button>
-          </div>
         </div>
 
         {error && (

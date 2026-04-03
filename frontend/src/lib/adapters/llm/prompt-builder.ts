@@ -1,22 +1,32 @@
 /**
  * Prompt builder — the ONLY place in the codebase that constructs LLM prompts.
  *
- * Privacy contract (enforced by type system):
- *   - Input type ReportPrompt contains only: firstName, gender, ratingSummary,
- *     topics, tone, length.
- *   - NO last names, org names, class names, birthdates, internal_notes,
- *     parent info, email addresses, or any other PII may appear here.
+ * Architecture: every prompt is assembled in two parts.
+ *   Part 1 — Header   (written once, contains all writing rules)
+ *   Part 2 — Student blocks (one per student, data only — no repeated rules)
  *
- * The output prompt template is fixed. Never modify it without updating the
- * privacy review in docs/tech-spec.md.
+ * Individual mode:  buildPrompt()       → header + 1 student block
+ * Batch mode:       buildBatchPrompt()  → header + N student blocks
+ *
+ * Both modes use identical rules. The only difference is the output format
+ * instruction at the top of the header.
+ *
+ * Privacy contract (enforced by type system):
+ *   Input types contain only: firstName, gender, RawRating[], topics, tone,
+ *   length, optional topicRatings, testContext, progression.
+ *   NO last names, org names, class names, birthdates, or any other PII.
  */
 
-import { ReportPrompt, ProgressionItem, TestContextItem, LENGTH_WORD_COUNT } from "./types";
+import {
+  ReportPrompt,
+  BatchStudentPayload,
+  BatchSessionConfig,
+  ProgressionItem,
+  TestContextItem,
+  LENGTH_WORD_RANGE,
+} from "./types";
 
-// ── Prompt injection defence ────────────────────────────────────────────────
-// Strips well-known injection phrases from any user-supplied free-text before
-// it is embedded in an LLM prompt. Only applied to user-editable fields
-// (comments, notes, names) — never to internal enum values.
+// ── Prompt injection defence ─────────────────────────────────────────────────
 
 const INJECTION_PATTERNS = [
   /ignore\s+(all\s+)?(previous|prior|above)\s+instructions?/gi,
@@ -27,258 +37,388 @@ const INJECTION_PATTERNS = [
   /\bact\s+as\s+/gi,
   /\bdan\s+mode\b/gi,
   /\bjailbreak\b/gi,
-  // Role-switch delimiters used by some models
   /\n{2,}(human|user|assistant|system)\s*:/gi,
   /<\s*\/?system\s*>/gi,
-]
+];
 
-/**
- * Remove prompt-injection patterns from a user-supplied string.
- * Replacement is a neutral ellipsis so surrounding text still reads naturally.
- */
-function sanitizeUserInput(value: string): string {
-  let out = value
+function sanitize(value: string): string {
+  let out = value;
   for (const pattern of INJECTION_PATTERNS) {
-    out = out.replace(pattern, '…')
+    out = out.replace(pattern, "…");
   }
-  return out
+  return out;
 }
 
-/**
- * Format a raw ratings array into the allow-listed summary string.
- * Input:  [{ disciplineName, score, comment? }]
- * Output: "Behaviour: 4/5, Homework: 3/5 (needs reminders), Participation: 5/5"
- *
- * Exported separately so the report service can call it before constructing
- * the ReportPrompt object.
- */
-export function formatRatingSummary(
-  ratings: Array<{ disciplineName: string; score: number; comment?: string | null }>
-): string {
-  return ratings
-    .map((r) => {
-      const base = `${sanitizeUserInput(r.disciplineName)}: ${r.score}/5`;
-      const comment = r.comment ? sanitizeUserInput(r.comment) : null;
-      return comment ? `${base} (${comment})` : base;
-    })
-    .join(", ");
-}
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
-/**
- * Map a student's stored gender code to an explicit pronoun string for the prompt.
- * Using full pronoun phrases rather than single-char codes avoids ambiguity for the LLM.
- */
 function resolvePronouns(gender: string | null | undefined): string {
   switch (gender?.toUpperCase()) {
-    case "M":  return "He/Him (use he, his, him)";
-    case "F":  return "She/Her (use she, her, hers)";
-    case "N":  return "They/Them (use they, their, them)";
-    default:   return "They/Them (use they, their, them)";
+    case "M":  return "He/Him";
+    case "F":  return "She/Her";
+    case "N":  return "They/Them";
+    default:   return "They/Them";
   }
 }
 
-/**
- * Map a numeric score (1–5) to a qualitative descriptor for the prompt.
- * Score names are kept generic so the LLM does not echo back subject names.
- */
-function scoreToDescriptor(score: number): string {
-  if (score >= 5) return "excellent";
-  if (score >= 4) return "good";
-  if (score >= 3) return "satisfactory";
-  if (score >= 2) return "developing";
-  return "needs support";
+/** Tone label and one-line description for Rule 2. */
+function toneDescription(tone: string): string {
+  switch (tone.toLowerCase()) {
+    case "gentle":
+      return "Gentle: Use warm, supportive language. Frame challenges softly and celebrate effort.";
+    case "direct":
+      return "Direct: Use clear, precise language. State observations plainly without softening.";
+    default:
+      return "Balanced: Balance honesty and encouragement. Be factual but constructive.";
+  }
+}
+
+/** Shape of a single test's filter config as stored in the session. */
+export interface TestFilterEntry {
+  includeMark?: boolean;
+  includePercentage?: boolean;
+  includeGrade?: boolean;
+  includeLowMention?: boolean;
 }
 
 /**
- * Map a topic score (1–5) to the quality word used in the LLM prompt.
- * These descriptors tell the LLM how the student performed on each topic
- * without ever exposing a numeric value.
+ * Derive the Rule 6 (TESTS) instruction from the session's test_filters config.
+ * This is the authoritative source — it fires based on what the teacher configured,
+ * not on whether students happen to have results yet.
+ *
+ * Returns null when no tests are configured for this session (omit Rule 6 entirely).
+ * When multiple score options are selected across tests (e.g. grade + low score),
+ * they are merged into a single instruction.
+ *
+ * Call this once per prompt assembly and store the result in ReportPrompt.testInstruction
+ * or BatchSessionConfig.testInstruction before passing to the prompt builders.
  */
-function scoreToTopicQuality(score: number): string {
-  if (score >= 5) return "exceptional understanding";
-  if (score >= 4) return "strong grasp";
-  if (score >= 3) return "developing understanding";
-  if (score >= 2) return "requires further focus";
-  return "needs significant support";
+export function resolveTestInstructionFromConfig(
+  testFilters: Record<string, TestFilterEntry>,
+  configuredTestIds: string[]
+): string | null {
+  const included = configuredTestIds.filter((id) => testFilters[id] !== undefined);
+  if (included.length === 0) return null;
+
+  const filters = included.map((id) => testFilters[id]);
+
+  const hasLow     = filters.some((f) => f?.includeLowMention);
+  const hasPercent = filters.some((f) => f?.includePercentage);
+  const hasGrade   = filters.some((f) => f?.includeGrade);
+  const hasMark    = filters.some((f) => f?.includeMark);
+  const hasAnyScore = hasPercent || hasGrade || hasMark;
+
+  // Build score-type label list for merged instructions
+  const scoreParts: string[] = [];
+  if (hasPercent) scoreParts.push("percentage score");
+  if (hasGrade)   scoreParts.push("grade");
+  if (hasMark)    scoreParts.push("mark (e.g. 14/20)");
+
+  if (hasLow && hasAnyScore) {
+    const scoreClause =
+      scoreParts.length === 1
+        ? `include the ${scoreParts[0]} as provided`
+        : `include the ${scoreParts.join(" and ")} as provided`;
+    return (
+      `For tests with a score: ${scoreClause}. ` +
+      `If a score is below 60%, acknowledge it with honest but constructive language. ` +
+      `If 60% or above, reference qualitatively without mentioning the score.`
+    );
+  }
+  if (hasLow) {
+    return (
+      "If a student's test score is below 60%, acknowledge it with honest but " +
+      "constructive language. If 60% or above, reference the test qualitatively " +
+      "without mentioning the score."
+    );
+  }
+  if (hasAnyScore) {
+    if (scoreParts.length === 1) {
+      return `Reference each test and include the ${scoreParts[0]} as provided in the student block.`;
+    }
+    return `Reference each test using the score data provided in the student block (${scoreParts.join(", ")} as shown).`;
+  }
+  // All included tests are qualitative only (no score flags set)
+  return "Reference the test naturally in the report. Do not mention any score, percentage, grade, or mark.";
 }
 
-/**
- * Map a trend + tone combination to natural language phrasing for the prompt.
- * Tone "gentle"  → encouraging, soft language.
- * Tone "balanced"→ factual improvement/decline statements.
- * Tone "direct"  → explicit performance shift language.
- */
-function trendPhrase(
-  item: ProgressionItem,
-  tone: string
-): string {
+// ── Progression helpers ───────────────────────────────────────────────────────
+
+function trendPhrase(item: ProgressionItem, tone: string): string {
   const { name, trend, previous, current } = item;
   const toneKey = tone.toLowerCase();
 
   if (trend === "improved") {
-    if (toneKey === "gentle") return `${name}: shows positive development (${previous} to ${current})`;
-    if (toneKey === "direct") return `${name}: rating improved from ${previous} to ${current}`;
+    if (toneKey === "gentle") return `${name}: shows positive development (${previous} → ${current})`;
+    if (toneKey === "direct") return `${name}: improved from ${previous} to ${current}`;
     return `${name}: improved from ${previous} to ${current}`;
   }
   if (trend === "declined") {
-    if (toneKey === "gentle") return `${name}: has found some challenge in this area (${previous} to ${current})`;
-    if (toneKey === "direct") return `${name}: rating declined from ${previous} to ${current}`;
+    if (toneKey === "gentle") return `${name}: has found some challenge in this area (${previous} → ${current})`;
+    if (toneKey === "direct") return `${name}: declined from ${previous} to ${current}`;
     return `${name}: declined from ${previous} to ${current}`;
   }
   // maintained
-  if (toneKey === "gentle") return `${name}: has continued to demonstrate consistent performance at ${current}`;
-  if (toneKey === "direct") return `${name}: maintained at ${current}`;
+  if (toneKey === "gentle") return `${name}: consistent performance at ${current}`;
   return `${name}: maintained at ${current}`;
 }
 
-/**
- * Build the optional progression context section appended to the prompt.
- * Only call this when payload.progression is non-empty.
- */
-function buildProgressionSection(
-  progression: ProgressionItem[],
-  tone: string
+// ── Part 1: Header ────────────────────────────────────────────────────────────
+
+function buildHeader(
+  mode: "individual" | "batch",
+  studentCount: number,
+  tone: string,
+  wordRange: { min: number; max: number },
+  testInstruction: string | null,
+  hasProgression: boolean
 ): string {
-  const lines = progression.map((item) => trendPhrase(item, tone));
-  return [
-    `Historical progression (reference only the following disciplines):`,
-    ...lines,
+  const outputInstruction =
+    mode === "individual"
+      ? "Write a report for 1 student. Respond with the report text only.\nNo labels, no JSON, no extra commentary."
+      : `Write reports for ${studentCount} student${studentCount !== 1 ? "s" : ""}. Respond ONLY with a valid JSON array.\nNo text before or after the array.\nFormat: [{ "studentId": "<id>", "report": "<text>" }, ...]\nOne object per student. Any non-JSON output will break the system.`;
+
+  const rules: string[] = [
+    `1. WORD COUNT`,
+    `   Write between ${wordRange.min} and ${wordRange.max} words per report.`,
+    `   Do not exceed ${wordRange.max} words under any circumstances.`,
     ``,
-    `Incorporate these trends naturally into the Strengths / Areas to Improve sections. Use phrasing appropriate to the selected report tone. Do NOT quote numeric scores from this section literally — convert them to qualitative language.`,
+    `2. TONE`,
+    `   ${toneDescription(tone)}`,
+    ``,
+    `3. FORMAT`,
+    `   No title, heading, greeting, or sign-off.`,
+    `   Start directly with the report text.`,
+    `   2–3 paragraphs separated by blank lines. No bullet points.`,
+    `   Cover these three areas across the paragraphs: classroom character`,
+    `   and engagement, academic performance with specific topic references,`,
+    `   and where relevant a grounded forward-looking observation. Vary the`,
+    `   paragraph structure naturally between students — do not apply the`,
+    `   same opening or sequence to every report.`,
+    ``,
+    `4. DISCIPLINES`,
+    `   Each student has discipline scores on a 1–5 scale.`,
+    `   1 = serious concern, 2 = below expectations, 3 = satisfactory,`,
+    `   4 = good, 5 = excellent.`,
+    `   Weave these into natural prose to reflect the student's attitude,`,
+    `   effort, and conduct. Do NOT name the discipline categories`,
+    `   (never write "Behaviour", "Homework", "Participation" etc).`,
+    `   Do NOT mention numeric scores.`,
+    ``,
+    `5. TOPICS`,
+    `   Each student has topic scores on the same 1–5 scale as disciplines.`,
+    `   Where topic scores differ notably from one another, acknowledge`,
+    `   the contrast naturally in prose. Never mention numeric scores directly.`,
+  ];
+
+  // Rule 6 — TESTS (omit entirely when no tests; subsequent rules shift)
+  if (testInstruction) {
+    rules.push(``, `6. TESTS`, `   ${testInstruction}`);
+  }
+
+  const pronounRule = testInstruction ? 7 : 6;
+  const qualityRule = pronounRule + 1;
+
+  rules.push(
+    ``,
+    `${pronounRule}. PRONOUNS`,
+    `   Use the student's specified pronouns consistently throughout.`,
+    `   Never switch pronouns mid-report.`,
+    ``,
+    `${qualityRule}. QUALITY`,
+    `   Express performance qualitatively using specific observations`,
+    `   grounded in the student's data. Avoid generic statements.`,
+    `   NEVER use these phrases — replace with grounded observations:`,
+    `   "making good progress" | "shows great potential" |`,
+    `   "I look forward to seeing" | "it is clear that" |`,
+    `   "a valued member of the class"`
+  );
+
+  if (hasProgression) {
+    const progressionRule = qualityRule + 1;
+    rules.push(
+      ``,
+      `${progressionRule}. PROGRESSION`,
+      `   Where historical discipline progression data is provided for a student,`,
+      `   incorporate these trends naturally using qualitative language.`,
+      `   Do NOT quote numeric scores from the progression section.`
+    );
+  }
+
+  return [
+    `You are a school teacher writing end-of-term report card comments.`,
+    ``,
+    outputInstruction,
+    ``,
+    `---`,
+    ``,
+    `WRITING RULES — apply to every report without exception:`,
+    ``,
+    ...rules,
   ].join("\n");
 }
 
-/**
- * Build the privacy-safe LLM prompt from a ReportPrompt payload.
- *
- * CRITICAL INSTRUCTIONS block tells the LLM:
- *   - Never mention numeric scores or discipline/category names.
- *   - Never include a title or heading line.
- *   - Write prose only, in the correct tone and length.
- *
- * When topicRatings are present, a scored topic section replaces the plain
- * topics list and an additional instruction guides per-topic prose contrast.
- */
-export function buildPrompt(payload: ReportPrompt): string {
-  // Sanitize all user-supplied free-text fields before embedding in prompt.
-  const safeFirstName = sanitizeUserInput(payload.firstName)
-  const safeRatingSummary = sanitizeUserInput(payload.ratingSummary)
-  const safeTopics = payload.topics.map(sanitizeUserInput)
+// ── Part 2: Student block ─────────────────────────────────────────────────────
 
-  const wordCount = LENGTH_WORD_COUNT[payload.length];
+function buildStudentBlock(
+  student: {
+    id: string;
+    firstName: string;
+    gender: string;
+    ratings: { name: string; score: number; comment?: string | null }[];
+    topics: string[];
+    topicRatings?: Array<{ topicName: string; score: number }>;
+    testContext?: TestContextItem[];
+    progression?: ProgressionItem[];
+    contextNote?: string;
+  },
+  index: number,
+  total: number,
+  tone: string
+): string {
+  const lines: string[] = [
+    `=== STUDENT ${index} of ${total} ===`,
+    `ID:        ${student.id}`,
+    `Name:      ${sanitize(student.firstName)}`,
+    `Pronouns:  ${resolvePronouns(student.gender)}`,
+  ];
 
-  // Determine the topics section — scored or plain depending on whether
-  // topic ratings have been provided for this student.
-  const hasTopicRatings =
-    payload.topicRatings !== undefined && payload.topicRatings.length > 0;
-
-  const topicsLine = (() => {
-    if (!hasTopicRatings) {
-      return safeTopics.length > 0
-        ? safeTopics.join(", ")
-        : "general curriculum topics";
+  // Disciplines section
+  if (student.ratings.length > 0) {
+    lines.push(``, `Disciplines:`);
+    for (const r of student.ratings) {
+      const comment = r.comment ? sanitize(r.comment) : null;
+      const note = comment ? ` — ${comment}` : "";
+      lines.push(`  - ${sanitize(r.name)}: ${r.score}/5${note}`);
     }
-    // Build scored section — topic names with quality descriptors only.
-    // Format: "Topic performance:\n[topicName]: [quality word]"
-    const scoredLines = (payload.topicRatings as Array<{ topicName: string; score: number }>)
-      .map((tr) => `${sanitizeUserInput(tr.topicName)}: ${scoreToTopicQuality(tr.score)}`)
-      .join("\n");
-    return `Topic performance:\n${scoredLines}`;
-  })();
+  }
 
-  // Convert the raw ratings summary into qualitative descriptors only.
-  // The discipline names are used here solely to derive an overall performance
-  // picture; they must NOT appear in the output.
-  const performanceLevel = (() => {
-    const scores = safeRatingSummary
-      .split(",")
-      .map((part) => {
-        const match = part.match(/(\d+)\/5/);
-        return match ? parseInt(match[1], 10) : null;
-      })
-      .filter((s): s is number => s !== null);
+  // Topics section (omit if no topics)
+  const hasTopicRatings = (student.topicRatings?.length ?? 0) > 0;
+  if (hasTopicRatings) {
+    lines.push(``, `Topics:`);
+    for (const tr of student.topicRatings!) {
+      lines.push(`  - ${sanitize(tr.topicName)}: ${tr.score}/5`);
+    }
+  } else if (student.topics.length > 0) {
+    lines.push(``, `Topics:`);
+    for (const t of student.topics) {
+      lines.push(`  - ${sanitize(t)}`);
+    }
+  }
 
-    if (scores.length === 0) return "satisfactory";
-    const avg = scores.reduce((a, b) => a + b, 0) / scores.length;
-    return scoreToDescriptor(Math.round(avg));
-  })();
+  // Tests section (omit if no tests)
+  if (student.testContext && student.testContext.length > 0) {
+    lines.push(``, `Tests:`);
+    for (const tc of student.testContext) {
+      const parts: string[] = [];
+      if (tc.percentage !== undefined) parts.push(`${tc.percentage}%`);
+      if (tc.grade) parts.push(`Grade: ${sanitize(tc.grade)}`);
+      if (tc.mark) parts.push(sanitize(tc.mark));
+      const scorePart = parts.length > 0 ? ` — ${parts.join(" | ")}` : "";
+      lines.push(`  - "${sanitize(tc.testName)}"${scorePart}`);
+    }
+  }
 
-  // Extract teacher notes (comments) from the rating summary without leaking
-  // discipline names — strip the "DisciplineName: N/5" prefix from each part.
-  const teacherNotes = safeRatingSummary
-    .split(",")
-    .map((part) => {
-      const match = part.match(/\(([^)]+)\)/);
-      return match ? match[1].trim() : null;
-    })
-    .filter((n): n is string => n !== null && n.length > 0);
+  // Historical progression section (omit if not present)
+  if (student.progression && student.progression.length > 0) {
+    lines.push(``, `Historical progression:`);
+    for (const item of student.progression) {
+      lines.push(`  - ${trendPhrase(item, tone)}`);
+    }
+  }
 
-  const notesLine = teacherNotes.length > 0
-    ? `Teacher notes to incorporate (do NOT quote verbatim): ${teacherNotes.join("; ")}`
-    : "";
-
-  // Build test context lines — one per test result item.
-  // Format: "Test: "[name]" — 72% (grade B). Incorporate this naturally."
-  const testLines: string[] =
-    payload.testContext && payload.testContext.length > 0
-      ? (payload.testContext as TestContextItem[]).map((tc) => {
-          const parts: string[] = [];
-          if (tc.percentage !== undefined) parts.push(`${tc.percentage}%`);
-          if (tc.grade) parts.push(`grade ${sanitizeUserInput(tc.grade)}`);
-          const context = parts.length > 0 ? ` — ${parts.join(", ")}` : "";
-          const lowNote =
-            tc.lowMention && tc.percentage !== undefined && tc.percentage < 50
-              ? ` This score is below average — acknowledge it honestly with ${payload.tone} tone.`
-              : "";
-          return `Test: "${sanitizeUserInput(tc.testName)}"${context}.${lowNote} Incorporate this result naturally in the report.`;
-        })
-      : [];
-
-  const lines = [
-    `You are writing a school report card comment for a student named ${safeFirstName}.`,
-    `Pronouns: ${resolvePronouns(payload.gender)}.`,
-    `Overall performance level: ${performanceLevel}.`,
-    hasTopicRatings ? topicsLine : `Topics covered this term: ${topicsLine}.`,
-    notesLine,
-    ...testLines,
-    ``,
-    `CRITICAL INSTRUCTIONS — you MUST follow these exactly:`,
-    `1. Write approximately ${wordCount} words total. No bullet points.`,
-    `2. Tone: ${payload.tone}. ${
-      payload.tone === "gentle"
-        ? "Use warm, supportive language. Frame challenges softly and celebrate effort."
-        : payload.tone === "direct"
-        ? "Use clear, precise language. State observations plainly without softening."
-        : "Balance honesty and encouragement. Be factual but constructive."
-    }`,
-    `3. Do NOT output a title, heading, or subject line of any kind. Start directly with the report text.`,
-    `4. NEVER mention the 1–5 discipline rating scores, or any assessment category/discipline names (e.g. do not write "Behaviour", "Homework", "Participation"). You MAY reference test percentages and grades if provided above.`,
-    `5. Express performance qualitatively using natural language tied to specific observations — not generic phrases.`,
-    `6. Include 1–2 specific references to topics covered.`,
-    ...(hasTopicRatings
-      ? [
-          `6b. Topic performance ratings are provided. Write paragraph 2 referencing topics individually where scores differ notably. Where a student scored higher on one topic than another, acknowledge the contrast naturally in prose. Never mention scores or numbers.`,
-        ]
-      : []),
-    `7. Structure the report in 2–3 short paragraphs separated by blank lines. NEVER write as a single block of text.`,
-    `   - Paragraph 1: Overall character, attitude, and engagement in class.`,
-    `   - Paragraph 2: Academic performance with specific topic references.`,
-    `   - Paragraph 3 (include for medium/long reports only): Progress made and what to focus on going forward — written as a specific, grounded observation, not a platitude.`,
-    `8. Use the pronouns specified above consistently throughout the entire report. Never switch pronouns mid-report.`,
-    `9. No sign-off, greeting, or closing line.`,
-    `10. BANNED phrases — never use any of these, replace with specific observations grounded in topics or context:`,
-    `    "making good progress" | "paying dividends" | "opportunity to apply themselves"`,
-    `    "I look forward to seeing" | "shows great potential" | "valuable contribution to the learning environment"`,
-    `    "when given the opportunity" | "it is clear that" | "goes without saying"`,
-  ].filter((l) => l !== undefined);
-
-  // Append progression context if provided and non-empty.
-  const hasProgression =
-    payload.progression !== undefined && payload.progression.length > 0;
-  if (hasProgression) {
-    lines.push(``);
-    lines.push(buildProgressionSection(payload.progression as ProgressionItem[], payload.tone));
+  // Additional teacher-provided context (class overview, custom note)
+  if (student.contextNote) {
+    lines.push(``, `Additional context:`, `  ${sanitize(student.contextNote)}`);
   }
 
   return lines.join("\n");
+}
+
+// ── Public API ────────────────────────────────────────────────────────────────
+
+/**
+ * Build the complete prompt for individual hosted-LLM mode.
+ * Part 1 (header with all rules) + Part 2 (single student block).
+ */
+export function buildPrompt(payload: ReportPrompt): string {
+  const wordRange = LENGTH_WORD_RANGE[payload.length];
+  // Use pre-computed instruction from caller (config-driven). Falls back to
+  // undefined check so null (explicit "no tests") is respected.
+  const testInstruction =
+    payload.testInstruction !== undefined ? payload.testInstruction : null;
+  const hasProgression = (payload.progression?.length ?? 0) > 0;
+
+  const header = buildHeader(
+    "individual",
+    1,
+    payload.tone,
+    wordRange,
+    testInstruction,
+    hasProgression
+  );
+
+  const block = buildStudentBlock(
+    {
+      id: "N/A", // not surfaced in individual mode — no JSON needed
+      firstName: payload.firstName,
+      gender: payload.gender,
+      ratings: payload.ratings,
+      topics: payload.topics,
+      topicRatings: payload.topicRatings,
+      testContext: payload.testContext,
+      progression: payload.progression,
+      contextNote: payload.contextNote,
+    },
+    1,
+    1,
+    payload.tone
+  );
+
+  return `${header}\n\n${block}`;
+}
+
+/**
+ * Build the complete prompt for batch (free-LLM copy) mode.
+ * Part 1 (header with all rules) + Part 2 (one block per student).
+ * The student ID is used in the block so the LLM can return it in JSON.
+ */
+export function buildBatchPrompt(
+  students: BatchStudentPayload[],
+  config: BatchSessionConfig
+): string {
+  const wordRange = LENGTH_WORD_RANGE[config.length];
+  const testInstruction = config.testInstruction;
+  const hasProgression = students.some((s) => (s.progression?.length ?? 0) > 0);
+
+  const header = buildHeader(
+    "batch",
+    students.length,
+    config.tone,
+    wordRange,
+    testInstruction,
+    hasProgression
+  );
+
+  const blocks = students
+    .map((s, i) =>
+      buildStudentBlock(
+        {
+          id: s.id,
+          firstName: s.firstName,
+          gender: s.gender,
+          ratings: s.ratings,
+          topics: s.topics,
+          topicRatings: s.topicRatings,
+          testContext: s.testContext,
+          progression: s.progression,
+        },
+        i + 1,
+        students.length,
+        config.tone
+      )
+    )
+    .join("\n\n");
+
+  return `${header}\n\n${blocks}`;
 }

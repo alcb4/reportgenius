@@ -80,8 +80,6 @@ interface SparklineGridProps {
   getTopicScore?: (studentId: string, topicName: string) => number | null;
   /** Called when the user sets a topic score. */
   onTopicScoreChange?: (studentId: string, topicName: string, score: number) => void;
-  /** Called when focus leaves a topic score group — triggers save. */
-  onTopicBlur?: (studentId: string, topicName: string) => void;
 }
 
 /** Sparkles icon — same as in RatingsGrid. */
@@ -105,8 +103,12 @@ const CIRCLE_R = 11;
 const HOLLOW_R = 9;
 /** Score-line label column width (left edge: "5 4 3 2 1"). */
 const SCORE_LABEL_W = 16;
-/** ViewBox width used by both the header SVG and the per-row staff SVG — must match. */
-const VW = 1000;
+/**
+ * Fixed pixel width of each discipline / topic column.
+ * Must match the RatingsGrid colgroup 110px discipline/topic columns so that
+ * sparkline dots sit directly above their table counterparts when switching views.
+ */
+const COL_W = 110;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -210,17 +212,18 @@ function StaffSVG({
 
   const VH = STAFF_H;
   const staffLeft = SCORE_LABEL_W;
-  const staffWidth = VW - SCORE_LABEL_W;
-  const colW = staffWidth / totalCount;
+  // Each column is exactly COL_W px wide — this makes SVG coordinates match the
+  // CSS grid columns so dots align with the column headers when switching views.
+  const totalSvgW = staffLeft + totalCount * COL_W;
 
   // x center of a column by overall index
   function colX(i: number): number {
-    return staffLeft + colW * i + colW / 2;
+    return staffLeft + COL_W * i + COL_W / 2;
   }
 
   // x boundary of the topic section (start of first topic column)
   const topicSectionX = totalCount > discCount
-    ? staffLeft + colW * discCount
+    ? staffLeft + COL_W * discCount
     : null;
 
   // Staff line Y positions (scores 1–5)
@@ -254,8 +257,8 @@ function StaffSVG({
 
   return (
     <svg
-      viewBox={`0 0 ${VW} ${VH}`}
-      width="100%"
+      viewBox={`0 0 ${totalSvgW} ${VH}`}
+      width={totalSvgW}
       height={VH}
       className="block"
       aria-hidden="true"
@@ -281,10 +284,11 @@ function StaffSVG({
           key={idx}
           x1={staffLeft}
           y1={y}
-          x2={VW}
+          x2={totalSvgW}
           y2={y}
           stroke="#e2e8f0"
           strokeWidth="0.8"
+          style={{ pointerEvents: "none" }}
         />
       ))}
 
@@ -294,13 +298,14 @@ function StaffSVG({
         return (
           <line
             key={`div-${i}`}
-            x1={staffLeft + colW * i}
+            x1={staffLeft + COL_W * i}
             y1={STAFF_PAD_V / 2}
-            x2={staffLeft + colW * i}
+            x2={staffLeft + COL_W * i}
             y2={STAFF_H - STAFF_PAD_V / 2}
             stroke="#f1f5f9"
             strokeWidth="0.6"
             strokeDasharray="3,3"
+            style={{ pointerEvents: "none" }}
           />
         );
       })}
@@ -314,6 +319,7 @@ function StaffSVG({
           y2={STAFF_H - STAFF_PAD_V / 2}
           stroke="#94a3b8"
           strokeWidth="1.5"
+          style={{ pointerEvents: "none" }}
         />
       )}
 
@@ -323,13 +329,14 @@ function StaffSVG({
         return (
           <line
             key={`topic-div-${i}`}
-            x1={staffLeft + colW * (discCount + i)}
+            x1={staffLeft + COL_W * (discCount + i)}
             y1={STAFF_PAD_V / 2}
-            x2={staffLeft + colW * (discCount + i)}
+            x2={staffLeft + COL_W * (discCount + i)}
             y2={STAFF_H - STAFF_PAD_V / 2}
             stroke="#f1f5f9"
             strokeWidth="0.6"
             strokeDasharray="3,3"
+            style={{ pointerEvents: "none" }}
           />
         );
       })}
@@ -480,8 +487,8 @@ function StaffSVG({
 
 /**
  * A single sticky header row that renders discipline names (and optional topic
- * names) above the staff rows. Uses the exact same VW / SCORE_LABEL_W geometry
- * as StaffSVG so columns align pixel-perfectly regardless of container width.
+ * names) above the staff rows. Uses the same fixed COL_W column widths as
+ * StaffSVG so headers sit directly above their sparkline columns.
  */
 function SparklineHeader({
   disciplines,
@@ -493,99 +500,77 @@ function SparklineHeader({
   if (disciplines.length === 0) return null;
 
   const totalCount = disciplines.length + topics.length;
-  const staffWidth = VW - SCORE_LABEL_W;
-  const colW = staffWidth / totalCount;
 
-  function colX(i: number): number {
-    return SCORE_LABEL_W + colW * i + colW / 2;
-  }
-
-  const topicSectionX = topics.length > 0
-    ? SCORE_LABEL_W + colW * disciplines.length
-    : null;
+  // Grid template matches each student row exactly
+  const gridTemplate = `180px repeat(${totalCount}, 110px) 1fr 40px`;
 
   return (
-    <div className="flex items-stretch bg-white border-b border-gray-200">
-      {/* Match the student name column width */}
-      <div className="min-w-[120px] max-w-[160px] shrink-0 px-4 py-2 flex items-end">
+    <div
+      className="bg-white border-b border-gray-200 w-full"
+      style={{ display: "grid", gridTemplateColumns: gridTemplate }}
+    >
+      {/* Student column header */}
+      <div className="px-4 py-2 flex items-end">
         <span className="text-xs font-semibold text-gray-400 uppercase tracking-wide">Student</span>
       </div>
-      {/* Header SVG — same viewBox width as StaffSVG */}
-      <div className="flex-1 min-w-0 px-0 py-1">
-        <svg
-          viewBox={`0 0 ${VW} 38`}
-          width="100%"
-          height={38}
-          aria-hidden="true"
-          className="block"
-        >
-          {/* Section label: "Topics" above topic columns */}
-          {topicSectionX !== null && (
-            <text
-              x={topicSectionX + (colW * topics.length) / 2}
-              y={11}
-              textAnchor="middle"
-              fontSize="9"
-              fontStyle="italic"
-              fill="#a78bfa"
-              fontFamily="system-ui, sans-serif"
-            >
-              Topics
-            </text>
-          )}
 
-          {/* Heavy divider line in header */}
-          {topicSectionX !== null && (
-            <line
-              x1={topicSectionX}
-              y1={0}
-              x2={topicSectionX}
-              y2={38}
-              stroke="#94a3b8"
-              strokeWidth="1.2"
+      {/* Discipline column headers — one cell per discipline */}
+      {disciplines.map((disc, i) => (
+        <div
+          key={disc.id}
+          className={`px-1 py-2 flex items-end justify-center ${i > 0 ? "border-l border-gray-100" : ""}`}
+        >
+          <span
+            className="text-xs font-semibold text-gray-500 uppercase tracking-wide truncate block text-center"
+            title={disc.name}
+          >
+            {truncate(disc.name, 11)}
+          </span>
+        </div>
+      ))}
+
+      {/* Topic column headers — one cell per topic */}
+      {topics.map((topicName, i) => (
+        <div
+          key={`th-topic-${topicName}`}
+          className={`px-1 py-2 flex items-end justify-center relative ${i !== 0 ? "border-l border-gray-100" : ""}`}
+        >
+          {/*
+           * First topic cell: render the heavy divider as an absolutely-
+           * positioned line at SCORE_LABEL_W px from the cell's left edge.
+           * This matches the SVG's topicSectionX = SCORE_LABEL_W + discCount*COL_W
+           * which, relative to the SVG container, is also SCORE_LABEL_W px into
+           * this very grid cell (since the container starts at the same left edge).
+           */}
+          {i === 0 && (
+            <div
+              style={{
+                position: "absolute",
+                left: SCORE_LABEL_W,
+                top: 0,
+                bottom: 0,
+                width: 2,
+                backgroundColor: "#94a3b8",
+                pointerEvents: "none",
+              }}
             />
           )}
+          <span
+            className="text-xs font-semibold text-slate-500 uppercase tracking-wide italic truncate block text-center"
+            title={topicName}
+          >
+            {truncate(topicName, 11)}
+          </span>
+        </div>
+      ))}
 
-          {/* Discipline column names */}
-          {disciplines.map((disc, i) => (
-            <text
-              key={disc.id}
-              x={colX(i)}
-              y={30}
-              textAnchor="middle"
-              fontSize="11"
-              fontWeight="500"
-              fill="#475569"
-              fontFamily="system-ui, sans-serif"
-            >
-              {truncate(disc.name, 11)}
-            </text>
-          ))}
-
-          {/* Topic column names */}
-          {topics.map((topicName, i) => (
-            <text
-              key={`th-topic-${topicName}`}
-              x={colX(disciplines.length + i)}
-              y={30}
-              textAnchor="middle"
-              fontSize="10"
-              fontStyle="italic"
-              fontWeight="400"
-              fill="#7c3aed"
-              fontFamily="system-ui, sans-serif"
-            >
-              {truncate(topicName, 11)}
-            </text>
-          ))}
-        </svg>
-      </div>
-      {/* Spacer: comment column */}
-      <div className="shrink-0 w-44 border-l border-gray-100 pl-3 flex items-end pb-1.5">
+      {/* Observations column header */}
+      <div className="border-l border-gray-100 pl-3 flex items-end pb-1.5">
         <span className="text-xs font-semibold text-gray-400 uppercase tracking-wide">Observations</span>
       </div>
-      {/* Spacer: report button column */}
-      <div className="shrink-0 w-10 border-l border-gray-100" />
+
+      {/* Action column header spacer */}
+      <div className="border-l border-gray-100" />
     </div>
   );
 }
@@ -608,7 +593,6 @@ export default function SparklineGrid({
   topics = [],
   getTopicScore,
   onTopicScoreChange,
-  onTopicBlur,
 }: SparklineGridProps) {
   // ── Drag state ──────────────────────────────────────────────────────────────
 
@@ -667,12 +651,12 @@ export default function SparklineGrid({
       const score = yToScore(relY);
 
       // Collect samples for whichever discipline column the pointer is over
-      // (topic columns are excluded from drag; click-only)
-      const relX = e.clientX - state.svgLeft;
-      const colW = state.svgWidth / disciplines.length;
+      // (topic columns are excluded from drag; click-only).
+      // Subtract SCORE_LABEL_W so column indices align with SVG column bands.
+      const relX = e.clientX - state.svgLeft - SCORE_LABEL_W;
       const colIdx = Math.max(
         0,
-        Math.min(disciplines.length - 1, Math.floor(relX / colW))
+        Math.min(disciplines.length - 1, Math.floor(relX / COL_W))
       );
       const disc = disciplines[colIdx];
       if (disc) {
@@ -736,8 +720,8 @@ export default function SparklineGrid({
     if (!containerEl) return;
     const rect = containerEl.getBoundingClientRect();
 
-    const colW = rect.width / disciplines.length;
-
+    // Use the fixed COL_W constant (matches the CSS grid column width) so
+    // column boundaries are accurate regardless of container pixel width.
     dragRef.current = {
       studentId,
       svgLeft: rect.left,
@@ -745,9 +729,9 @@ export default function SparklineGrid({
       svgTop: rect.top,
       colCenters: disciplines.map((d, i) => ({
         discId: d.id,
-        xCenter: rect.left + colW * i + colW / 2,
+        xCenter: rect.left + COL_W * i + COL_W / 2,
       })),
-      colWidth: colW,
+      colWidth: COL_W,
       startX: e.clientX,
       active: false,
       samples: new Map(),
@@ -757,7 +741,7 @@ export default function SparklineGrid({
     e.preventDefault();
   }
 
-  // ── Click on a discipline band (alternative to drag) ─────────────────────
+  // ── Click on a discipline or topic band (alternative to drag) ───────────
 
   function handleStaffClick(
     e: ReactMouseEvent<HTMLDivElement>,
@@ -776,21 +760,33 @@ export default function SparklineGrid({
     if (!containerEl) return;
     const rect = containerEl.getBoundingClientRect();
 
-    // Map X to discipline index
-    const relX = e.clientX - rect.left;
-    const colW = rect.width / disciplines.length;
-    const colIdx = Math.max(
-      0,
-      Math.min(disciplines.length - 1, Math.floor(relX / colW))
-    );
-    const disc = disciplines[colIdx];
-    if (!disc) return;
-
-    // Map Y to score
+    // Map Y to score — shared for both discipline and topic clicks.
     const relY = e.clientY - rect.top;
     const score = yToScore(relY);
 
-    onScoreChange(studentId, disc.id, score);
+    // Map X to an overall column index across discipline + topic columns.
+    // The SVG has SCORE_LABEL_W px of label space before column 0, so we
+    // subtract that offset before computing which column was clicked.
+    const relX = e.clientX - rect.left - SCORE_LABEL_W;
+
+    if (relX < 0) return; // clicked inside the score-label gutter
+
+    const overallIdx = Math.floor(relX / COL_W);
+
+    if (overallIdx < disciplines.length) {
+      // Discipline column
+      const disc = disciplines[overallIdx];
+      if (!disc) return;
+      onScoreChange(studentId, disc.id, score);
+    } else {
+      // Topic column
+      const topicIdx = overallIdx - disciplines.length;
+      if (topicIdx < 0 || topicIdx >= topics.length) return;
+      const topicName = topics[topicIdx];
+      if (onTopicScoreChange) {
+        onTopicScoreChange(studentId, topicName, score);
+      }
+    }
   }
 
   // ── Empty states ───────────────────────────────────────────────────────────
@@ -800,7 +796,7 @@ export default function SparklineGrid({
   // ── Render ─────────────────────────────────────────────────────────────────
 
   return (
-    <div>
+    <div className="w-fit min-w-full self-start">
       <SparklineHeader disciplines={disciplines} topics={topics} />
     <div className="space-y-0 divide-y divide-gray-100">
       {students.map((student) => {
@@ -826,15 +822,19 @@ export default function SparklineGrid({
         const isDraggingThisStudent =
           dragPreview?.studentId === student.id && dragPreview.scores.size > 0;
 
+        const totalCount = disciplines.length + topics.length;
+        const rowGridTemplate = `180px repeat(${totalCount}, 110px) 1fr 40px`;
+
         return (
           <div
             key={student.id}
-            className={`flex items-stretch gap-3 px-4 py-2 transition-colors ${tint} ${
+            className={`w-full transition-colors ${tint} ${
               isDraggingThisStudent ? "select-none" : ""
             }`}
+            style={{ display: "grid", gridTemplateColumns: rowGridTemplate }}
           >
-            {/* Left: student info */}
-            <div className="flex flex-col justify-center min-w-[120px] max-w-[160px] shrink-0">
+            {/* Student info — column 1 (180px) */}
+            <div className="flex flex-col justify-center px-4 py-2">
               <div className="font-medium text-gray-900 text-sm leading-tight">
                 {student.first_name}
                 {student.last_name ? ` ${student.last_name}` : ""}
@@ -853,13 +853,14 @@ export default function SparklineGrid({
               )}
             </div>
 
-            {/* Staff area — flex-1, measured for drag/click coordinates */}
+            {/* Staff SVG — spans all discipline + topic columns */}
             <div
               ref={(el) => {
                 if (el) containerRefs.current.set(student.id, el);
                 else containerRefs.current.delete(student.id);
               }}
-              className={`flex-1 min-w-0 ${isReadOnly ? "cursor-default" : "cursor-crosshair"}`}
+              className={`${isReadOnly ? "cursor-default" : "cursor-crosshair"}`}
+              style={{ gridColumn: `span ${totalCount}` }}
               onMouseDown={(e) => handleStaffMouseDown(e, student.id)}
               onClick={(e) => handleStaffClick(e, student.id)}
             >
@@ -876,56 +877,8 @@ export default function SparklineGrid({
               />
             </div>
 
-            {/* Topic score buttons — rendered inline below the staff when topics exist */}
-            {topics.length > 0 && (
-              <div className="flex flex-col justify-center gap-1 shrink-0 border-l border-slate-300 pl-2">
-                {topics.map((topicName) => {
-                  const score = getTopicScore
-                    ? getTopicScore(student.id, topicName)
-                    : null;
-                  return (
-                    <div key={topicName} className="flex items-center gap-1">
-                      <span className="text-xs text-slate-400 italic w-16 truncate" title={topicName}>
-                        {topicName.length > 8 ? topicName.slice(0, 8) + "…" : topicName}
-                      </span>
-                      <div
-                        className="inline-flex gap-px rounded focus:outline-none focus:ring-2 focus:ring-indigo-400 focus:ring-offset-1"
-                        tabIndex={0}
-                        onBlur={() => onTopicBlur && onTopicBlur(student.id, topicName)}
-                      >
-                        {[1, 2, 3, 4, 5].map((v) => {
-                          const active = score === v;
-                          return (
-                            <button
-                              key={v}
-                              type="button"
-                              tabIndex={-1}
-                              disabled={isReadOnly}
-                              onClick={() =>
-                                onTopicScoreChange &&
-                                onTopicScoreChange(student.id, topicName, v)
-                              }
-                              aria-label={`Topic ${topicName} score ${v}`}
-                              className={`w-5 h-5 rounded text-xs font-bold transition-all select-none
-                                ${isReadOnly ? "cursor-default" : "cursor-pointer hover:scale-110"}
-                                ${active
-                                  ? "bg-indigo-600 text-white shadow-sm"
-                                  : "bg-slate-200 text-slate-700 hover:bg-indigo-100 hover:text-indigo-700"
-                                }`}
-                            >
-                              {v}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-
-            {/* Comment field — fixed width, full staff height, right of the staff */}
-            <div className="shrink-0 w-44 flex items-center border-l border-gray-100 pl-3">
+            {/* Comment field — fills 1fr */}
+            <div className="flex items-center border-l border-gray-100 pl-3">
               <textarea
                 disabled={isReadOnly}
                 value={getComment(student.id)}
@@ -938,13 +891,13 @@ export default function SparklineGrid({
               />
             </div>
 
-            {/* Report generate button */}
+            {/* Report generate button — 40px column */}
             {(() => {
               const report = reports.get(student.id);
               const fullyRated = fullyRatedStudentIds.has(student.id);
               const isGenerating = generatingStudentId === student.id;
               return (
-                <div className="shrink-0 w-10 flex items-center justify-center border-l border-gray-100">
+                <div className="flex items-center justify-center border-l border-gray-100">
                   {report ? (
                     report.status === "failed" ? (
                       <button

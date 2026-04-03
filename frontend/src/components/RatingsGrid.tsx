@@ -456,9 +456,6 @@ export default function RatingsGrid({
 
   // Keyed by `${studentId}|${topicName}` → score
   const [topicGrid, setTopicGrid] = useState<Map<string, number | null>>(() => new Map());
-  const [pendingTopicChanges, setPendingTopicChanges] = useState<
-    Map<string, { studentId: string; topicName: string; score: number }>
-  >(() => new Map());
   const [topicSaveError, setTopicSaveError] = useState<string | null>(null);
 
   // Load topic ratings on mount
@@ -469,8 +466,8 @@ export default function RatingsGrid({
     async function loadTopicRatings() {
       try {
         interface TopicRatingEntry {
-          student_id: string;
-          topic_name: string;
+          studentId: string;
+          topicName: string;
           score: number;
         }
         interface TopicRatingsResponse {
@@ -482,7 +479,7 @@ export default function RatingsGrid({
         if (cancelled) return;
         const m = new Map<string, number | null>();
         for (const r of result.ratings) {
-          m.set(`${r.student_id}|${r.topic_name}`, r.score);
+          m.set(`${r.studentId}|${r.topicName}`, r.score);
         }
         setTopicGrid(m);
       } catch (err) {
@@ -603,28 +600,6 @@ export default function RatingsGrid({
     return () => clearInterval(timer);
   }, [saveAllPending]);
 
-  /**
-   * Flush all pending topic changes to the API.
-   */
-  const saveAllPendingTopics = useCallback(async () => {
-    if (pendingTopicChanges.size === 0) return;
-    const ratings = Array.from(pendingTopicChanges.values());
-    setPendingTopicChanges(new Map());
-    try {
-      await apiFetch(`/api/v1/sessions/${sessionId}/topic-ratings/bulk`, {
-        method: "POST",
-        body: { ratings },
-      });
-    } catch (err) {
-      setTopicSaveError(err instanceof APIError ? err.message : "Failed to save topic ratings.");
-    }
-  }, [sessionId, pendingTopicChanges]);
-
-  // 30-second auto-save interval for topic ratings
-  useEffect(() => {
-    const timer = setInterval(saveAllPendingTopics, 30_000);
-    return () => clearInterval(timer);
-  }, [saveAllPendingTopics]);
 
   // ── Score change handler ────────────────────────────────────────────────────
 
@@ -645,28 +620,15 @@ export default function RatingsGrid({
 
   // ── Topic score change handler ─────────────────────────────────────────────
 
-  function handleTopicScoreChange(studentId: string, topicName: string, score: number) {
+  async function handleTopicScoreChange(studentId: string, topicName: string, score: number) {
     if (isReadOnly) return;
     const key = `${studentId}|${topicName}`;
     setTopicGrid((prev) => new Map(prev).set(key, score));
-    setPendingTopicChanges((prev) =>
-      new Map(prev).set(key, { studentId, topicName, score })
-    );
-  }
-
-  async function saveTopicRating(studentId: string, topicName: string) {
-    const key = `${studentId}|${topicName}`;
-    const change = pendingTopicChanges.get(key);
-    if (!change) return;
-    setPendingTopicChanges((prev) => {
-      const n = new Map(prev);
-      n.delete(key);
-      return n;
-    });
+    setTopicSaveError(null);
     try {
       await apiFetch(`/api/v1/sessions/${sessionId}/topic-ratings/bulk`, {
         method: "POST",
-        body: { ratings: [change] },
+        body: { ratings: [{ studentId, topicName, score }] },
       });
     } catch (err) {
       setTopicSaveError(err instanceof APIError ? err.message : "Failed to save topic rating.");
@@ -1097,24 +1059,42 @@ export default function RatingsGrid({
         </div>
       </div>
 
-      {/* Progress bar */}
+      {/* Progress bar + Generate CTA */}
       <div className="bg-white rounded-lg border border-gray-200 shadow-sm px-5 py-3">
-        <div className="flex items-center justify-between mb-1.5">
-          <span className="text-xs font-medium text-gray-600">
+        <div className="flex items-center gap-4">
+          {/* Left: label */}
+          <span className="flex-none text-xs font-medium text-gray-600 whitespace-nowrap">
             {fullyRatedCount} / {students.length} students fully rated
           </span>
-          {hasUnsaved && (
-            <span className="flex items-center gap-1 text-xs text-amber-600">
-              <span className="inline-block w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
-              Unsaved changes
-            </span>
-          )}
-        </div>
-        <div className="w-full bg-gray-100 rounded-full h-2 overflow-hidden">
-          <div
-            className="h-2 rounded-full bg-indigo-600 transition-all duration-500"
-            style={{ width: `${progressPct}%` }}
-          />
+          {/* Middle: progress bar */}
+          <div className="flex-1 bg-gray-100 rounded-full h-2 overflow-hidden">
+            <div
+              className="h-2 rounded-full bg-indigo-600 transition-all duration-500"
+              style={{ width: `${progressPct}%` }}
+            />
+          </div>
+          {/* Right: unsaved indicator + Generate CTA */}
+          <div className="flex-none flex items-center gap-3">
+            {hasUnsaved && (
+              <span className="flex items-center gap-1 text-xs text-amber-600 whitespace-nowrap">
+                <span className="inline-block w-2 h-2 rounded-full bg-amber-500 animate-pulse" />
+                Unsaved
+              </span>
+            )}
+            {!isReadOnly && (
+              <button
+                onClick={handleBulkGenerate}
+                disabled={anyRatedCount === 0 || isBulkRunning}
+                className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-md bg-indigo-600 text-sm font-semibold text-white hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition shadow-sm whitespace-nowrap"
+              >
+                {isBulkRunning
+                  ? "Generating..."
+                  : anyRatedCount === 0
+                  ? "Generate reports"
+                  : `Generate ${anyRatedCount} report${anyRatedCount !== 1 ? "s" : ""}`}
+              </button>
+            )}
+          </div>
         </div>
       </div>
 
@@ -1152,7 +1132,6 @@ export default function RatingsGrid({
             topics={topics}
             getTopicScore={getTopicScore}
             onTopicScoreChange={handleTopicScoreChange}
-            onTopicBlur={saveTopicRating}
           />
         </div>
       )}
@@ -1208,13 +1187,25 @@ export default function RatingsGrid({
             </svg>
           );
         })()}
-        <table className="w-full text-sm border-collapse">
+        <table className="table-fixed w-full text-sm border-collapse">
+          <colgroup>
+            <col style={{ width: "180px" }} />
+            {disciplines.map((disc) => (
+              <col key={disc.id} style={{ width: "110px" }} />
+            ))}
+            {topics.map((topicName) => (
+              <col key={topicName} style={{ width: "110px" }} />
+            ))}
+            {/* Comment column — no explicit width, absorbs remaining space */}
+            <col />
+            <col style={{ width: "40px" }} />
+          </colgroup>
           <thead>
             {/* Row 1: group labels */}
             <tr className="bg-slate-100 border-b border-gray-200">
               <th
                 rowSpan={2}
-                className="sticky left-0 z-10 bg-slate-100 px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide min-w-[140px]"
+                className="sticky left-0 z-10 bg-slate-100 px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide"
               >
                 Student
               </th>
@@ -1236,13 +1227,13 @@ export default function RatingsGrid({
               )}
               <th
                 rowSpan={2}
-                className="px-3 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide min-w-[160px]"
+                className="px-3 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide"
               >
                 Comment
               </th>
               <th
                 rowSpan={2}
-                className="px-3 py-3 text-center text-xs font-semibold text-gray-500 uppercase tracking-wide w-14"
+                className="px-3 py-3 text-center text-xs font-semibold text-gray-500 uppercase tracking-wide"
               >
                 <SparklesIcon className="w-4 h-4 mx-auto text-gray-400" />
               </th>
@@ -1252,7 +1243,7 @@ export default function RatingsGrid({
               {disciplines.map((disc, di) => (
                 <th
                   key={disc.id}
-                  className={`px-1 py-2 text-center text-xs font-semibold text-gray-500 uppercase tracking-wide min-w-[110px] max-w-[120px] ${di > 0 ? "border-l border-slate-200" : ""} ${di % 2 === 1 ? "bg-slate-50" : ""}`}
+                  className={`px-1 py-2 text-center text-xs font-semibold text-gray-500 uppercase tracking-wide ${di > 0 ? "border-l border-slate-200" : ""} ${di % 2 === 1 ? "bg-slate-50" : ""}`}
                   title={disc.name}
                 >
                   <span className="truncate block max-w-[110px] mx-auto" title={disc.name}>
@@ -1263,7 +1254,7 @@ export default function RatingsGrid({
               {topics.map((topicName, ti) => (
                 <th
                   key={topicName}
-                  className={`px-1 py-2 text-center text-xs font-semibold text-slate-500 uppercase tracking-wide min-w-[110px] max-w-[120px] ${ti === 0 ? "border-l-2 border-slate-400" : "border-l border-slate-200"}`}
+                  className={`px-1 py-2 text-center text-xs font-semibold text-slate-500 uppercase tracking-wide ${ti === 0 ? "border-l-2 border-slate-400" : "border-l border-slate-200"}`}
                   title={topicName}
                 >
                   <span className="truncate block max-w-[110px] mx-auto italic" title={topicName}>
@@ -1383,7 +1374,6 @@ export default function RatingsGrid({
                         <div
                           className="inline-flex gap-px rounded focus:outline-none focus:ring-2 focus:ring-indigo-400 focus:ring-offset-1"
                           tabIndex={0}
-                          onBlur={() => saveTopicRating(student.id, topicName)}
                         >
                           {[1, 2, 3, 4, 5].map((v) => {
                             const active = score === v;
@@ -1411,8 +1401,8 @@ export default function RatingsGrid({
                     );
                   })}
 
-                  {/* Comment */}
-                  <td className="px-2 py-2">
+                  {/* Comment — flexible column that expands to fill remaining width */}
+                  <td className="px-2 py-2 w-full">
                     <input
                       id={`comment-${student.id}`}
                       type="text"
@@ -1444,46 +1434,6 @@ export default function RatingsGrid({
         </table>
       </div>
 
-      {/* Bulk generation footer */}
-      {!isReadOnly && (
-        <div className="bg-white rounded-lg border border-gray-200 shadow-sm px-5 py-4 flex items-center justify-between gap-4 flex-wrap">
-          <div className="text-sm text-gray-600">
-            {anyRatedCount === 0 ? (
-              <span className="text-gray-400">Rate at least one student to enable bulk generation.</span>
-            ) : (
-              <>
-                <span className="font-semibold text-indigo-700">{anyRatedCount}</span> student{anyRatedCount !== 1 ? "s" : ""} rated and ready to generate
-                {students.length - anyRatedCount > 0 && (
-                  <span className="text-gray-400 ml-1">
-                    ({students.length - anyRatedCount} unrated will be skipped)
-                  </span>
-                )}
-              </>
-            )}
-          </div>
-          <div className="flex items-center gap-3">
-            {hasUnsaved && (
-              <button
-                onClick={saveAllPending}
-                className="px-3 py-2 rounded-md border border-gray-300 text-sm font-medium text-gray-700 hover:bg-gray-50 transition"
-              >
-                Save All
-              </button>
-            )}
-            <button
-              onClick={handleBulkGenerate}
-              disabled={anyRatedCount === 0 || isBulkRunning}
-              className="px-5 py-2 rounded-md bg-indigo-600 text-sm font-semibold text-white hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed transition shadow-sm"
-            >
-              {isBulkRunning
-                ? "Generating..."
-                : anyRatedCount === 0
-                ? "Rate students to generate reports"
-                : `Generate ${anyRatedCount} Report${anyRatedCount !== 1 ? "s" : ""}`}
-            </button>
-          </div>
-        </div>
-      )}
 
       {/* Bulk progress toast */}
       {bulkBatchId !== null && (

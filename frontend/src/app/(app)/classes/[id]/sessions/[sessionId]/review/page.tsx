@@ -14,10 +14,17 @@ import { useEffect, useState, useRef, useCallback } from "react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { apiFetch, APIError } from "@/lib/api";
+import CompactFilterBar, {
+  FilterBarSession,
+  FilterBarPatch,
+  ClassTest,
+  ProgressionData,
+} from "@/components/CompactFilterBar";
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
+// Use relative URLs so all requests go through the Next.js server (same origin).
+// This avoids CSP violations that occur when calling the Express backend on port 3001 directly.
 
 // ── Authenticated export download ─────────────────────────────────────────────
 
@@ -68,6 +75,11 @@ interface ReviewSessionDetail {
   tone: string;
   length: string;
   status: string;
+  test_filters: Record<string, { includeMark: boolean; includePercentage: boolean; includeGrade: boolean; includeLowMention: boolean }> | null;
+  progression_filters: string[];
+  enable_progression: boolean;
+  allow_negative_progression: boolean;
+  class_overview: string | null;
 }
 
 interface FullReport {
@@ -162,8 +174,19 @@ export default function ReviewPage() {
   const [ratingsHistory, setRatingsHistory] = useState<RatingsHistoryEntry[]>([]);
   const [ratingsHistoryExpanded, setRatingsHistoryExpanded] = useState(false);
   const [showMoreRatingsHistory, setShowMoreRatingsHistory] = useState(false);
+  const [classTests, setClassTests] = useState<ClassTest[]>([]);
+  const [progressionData, setProgressionData] = useState<ProgressionData | null>(null);
+  const [filtersChangedSinceGenerate, setFiltersChangedSinceGenerate] = useState(false);
+
+  // Free AI Model panel state
+  const [freeModelExpanded, setFreeModelExpanded] = useState(false);
+  const [freeModelPaste, setFreeModelPaste] = useState("");
+  const [freeModelCopyStatus, setFreeModelCopyStatus] = useState<"idle" | "copied">("idle");
+  const [freeModelParseStatus, setFreeModelParseStatus] = useState<"idle" | "parsing" | "success" | "error">("idle");
+  const [freeModelError, setFreeModelError] = useState<string | null>(null);
 
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const filterSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const prevStudentIdRef = useRef<string | null>(null);
 
   // ── Derived values ─────────────────────────────────────────────────────────
@@ -219,18 +242,20 @@ export default function ReviewPage() {
 
         setSessionMeta(sessionRes.data.session);
 
-        // Fetch class meta for display name
-        try {
-          interface ClassResponse {
-            data: { id: string; name: string };
-          }
-          const classRes = await apiFetch<ClassResponse>(
-            `/api/v1/classes/${sessionRes.data.session.class_id}`
-          );
-          if (!cancelled) setClassMeta(classRes.data);
-        } catch {
-          // Non-fatal — class name is display-only
-        }
+        const fetchedClassId = sessionRes.data.session.class_id;
+
+        // Fetch class meta, tests, and progression in parallel (all non-fatal)
+        await Promise.all([
+          apiFetch<{ data: { id: string; name: string } }>(`/api/v1/classes/${fetchedClassId}`)
+            .then((r) => { if (!cancelled) setClassMeta(r.data); })
+            .catch(() => {}),
+          apiFetch<{ data: ClassTest[] }>(`/api/v1/classes/${fetchedClassId}/tests`)
+            .then((r) => { if (!cancelled) setClassTests(r.data); })
+            .catch(() => {}),
+          apiFetch<ProgressionData>(`/api/v1/sessions/${sessionId}/progression-data`)
+            .then((pd) => { if (!cancelled) setProgressionData(pd); })
+            .catch(() => {}),
+        ]);
 
         // Use ratings response for students (has per-discipline scores)
         setStudents(ratingsRes.students);
@@ -272,6 +297,11 @@ export default function ReviewPage() {
     setShowMoreRatingsHistory(false);
     setSaveStatus("saved");
     setStudentLoading(true);
+    // Reset free model panel
+    setFreeModelPaste("");
+    setFreeModelParseStatus("idle");
+    setFreeModelError(null);
+    setFreeModelExpanded(false);
 
     const sessionReport = sessionReports.get(currentStudentId);
 
@@ -280,23 +310,27 @@ export default function ReviewPage() {
         // Pass excludeReportId so the backend omits the current report from history.
         const excludeParam = sessionReport ? `?excludeReportId=${sessionReport.id}` : "";
         const fetches: Promise<void>[] = [
-          apiFetch(`/api/v1/students/${currentStudentId}/ratings-history`).then(
-            (r: unknown) => {
+          apiFetch(`/api/v1/students/${currentStudentId}/ratings-history`)
+            .then((r: unknown) => {
               setRatingsHistory(
                 (r as { history: RatingsHistoryEntry[] }).history ?? []
               );
-            }
-          ),
-          apiFetch(`/api/v1/students/${currentStudentId}/reports${excludeParam}`).then(
-            (r: unknown) => {
-              const all = (r as { reports: HistoryReport[] }).reports;
+            })
+            .catch(() => {
+              // 404 (student has no ratings history) — leave state as reset []
+            }),
+          apiFetch(`/api/v1/students/${currentStudentId}/reports${excludeParam}`)
+            .then((r: unknown) => {
+              const all = (r as { reports: HistoryReport[] }).reports ?? [];
               // Belt-and-braces client-side filter in case the report was just created.
               const filtered = sessionReport
                 ? all.filter((h) => h.id !== sessionReport.id)
                 : all;
               setHistoryReports(filtered);
-            }
-          ),
+            })
+            .catch(() => {
+              // Non-fatal — leave state as reset []
+            }),
         ];
 
         if (sessionReport) {
@@ -435,6 +469,7 @@ export default function ReviewPage() {
       setEditedContent(result.report.edited_content);
       setIsEditable(true);
       setSaveStatus("saved");
+      setFiltersChangedSinceGenerate(false);
       setSessionReports((prev) => {
         const next = new Map(prev);
         next.set(result.report.student_id, {
@@ -451,6 +486,32 @@ export default function ReviewPage() {
       setGenerating(false);
     }
   }
+
+  // ── Filter save (debounced 600ms) ─────────────────────────────────────────
+
+  const handleFilterSave = useCallback(
+    (patch: FilterBarPatch) => {
+      setSessionMeta((prev) => (prev ? { ...prev, ...patch } : prev));
+      setFiltersChangedSinceGenerate(true);
+
+      if (filterSaveTimerRef.current) clearTimeout(filterSaveTimerRef.current);
+      filterSaveTimerRef.current = setTimeout(async () => {
+        try {
+          interface UpdateSessionResponse {
+            data: ReviewSessionDetail;
+          }
+          const result = await apiFetch<UpdateSessionResponse>(
+            `/api/v1/sessions/${sessionId}`,
+            { method: "PUT", body: patch }
+          );
+          setSessionMeta(result.data);
+        } catch {
+          // Non-fatal — filter state is still local
+        }
+      }, 600);
+    },
+    [sessionId]
+  );
 
   // ── Redo ───────────────────────────────────────────────────────────────────
 
@@ -470,10 +531,81 @@ export default function ReviewPage() {
       setEditedContent(result.report.edited_content);
       setIsEditable(true);
       setSaveStatus("saved");
+      setFiltersChangedSinceGenerate(false);
     } catch (err) {
       setError(err instanceof APIError ? err.message : "Redo failed");
     } finally {
       setRedoing(false);
+    }
+  }
+
+  // ── Free AI Model: copy prompt ─────────────────────────────────────────────
+
+  async function handleFreeModelCopy() {
+    if (!currentStudentId) return;
+    try {
+      interface PromptResponse { prompt: string }
+      const result = await apiFetch<PromptResponse>(
+        `/api/v1/sessions/${sessionId}/batch-prompt?studentIds=${encodeURIComponent(currentStudentId)}`
+      );
+      await navigator.clipboard.writeText(result.prompt);
+      setFreeModelCopyStatus("copied");
+      setTimeout(() => setFreeModelCopyStatus("idle"), 2000);
+    } catch (err) {
+      setFreeModelError(err instanceof APIError ? err.message : "Failed to copy prompt.");
+    }
+  }
+
+  // ── Free AI Model: parse & apply ───────────────────────────────────────────
+
+  async function handleFreeModelParse() {
+    if (!freeModelPaste.trim() || !currentStudentId) return;
+    setFreeModelParseStatus("parsing");
+    setFreeModelError(null);
+
+    try {
+      interface ParseResponse {
+        results: Array<{ studentId: string; name: string; success: boolean; error?: string }>;
+        saved: number;
+        failed: number;
+      }
+      const result = await apiFetch<ParseResponse>(
+        `/api/v1/sessions/${sessionId}/parse-reports`,
+        {
+          method: "POST",
+          body: { raw: freeModelPaste, studentIds: [currentStudentId] },
+        }
+      );
+
+      if (result.saved === 0 || result.results[0]?.success === false) {
+        const errMsg = result.results[0]?.error ?? "Report could not be saved.";
+        setFreeModelParseStatus("error");
+        setFreeModelError(errMsg);
+        return;
+      }
+
+      setFreeModelParseStatus("success");
+      setFreeModelPaste("");
+      setFreeModelExpanded(false);
+
+      // Reload the report for this student from the session list, then fetch full report
+      interface ReportsListResponse { reports: SessionReport[] }
+      const reportsRes = await apiFetch<ReportsListResponse>(`/api/v1/sessions/${sessionId}/reports`);
+      const updatedMap = new Map<string, SessionReport>();
+      for (const r of reportsRes.reports) updatedMap.set(r.student_id, r);
+      setSessionReports(updatedMap);
+
+      const savedReport = updatedMap.get(currentStudentId);
+      if (savedReport) {
+        const fullRes = await apiFetch<{ report: FullReport }>(`/api/v1/reports/${savedReport.id}`);
+        setCurrentReport(fullRes.report);
+        setEditedContent(fullRes.report.edited_content);
+        setIsEditable(fullRes.report.status !== "final");
+        setSaveStatus("saved");
+      }
+    } catch (err) {
+      setFreeModelParseStatus("error");
+      setFreeModelError(err instanceof APIError ? err.message : "Failed to parse response.");
     }
   }
 
@@ -607,6 +739,19 @@ export default function ReviewPage() {
         </button>
       </div>
 
+      {/* ── Filter bar ───────────────────────────────────────────────────── */}
+      {sessionMeta && (
+        <div className="max-w-6xl mx-auto w-full px-4 pt-4 border-b border-gray-200">
+          <CompactFilterBar
+            session={sessionMeta as FilterBarSession}
+            disciplines={disciplines}
+            classTests={classTests}
+            progressionData={progressionData}
+            onSave={handleFilterSave}
+          />
+        </div>
+      )}
+
       {/* ── Main content ─────────────────────────────────────────────────── */}
       <div className="flex-1 max-w-6xl mx-auto w-full px-4 py-6 grid grid-cols-1 lg:grid-cols-[30%_70%] gap-6">
         {/* Left column */}
@@ -680,7 +825,7 @@ export default function ReviewPage() {
               className="flex items-center justify-between w-full text-sm font-semibold text-gray-700 mb-2"
             >
               <span>
-                Previous Reports ({Math.min(historyReports.length, showMoreHistory ? historyReports.length : 3)})
+                Previous Reports ({Math.min(historyReports?.length ?? 0, showMoreHistory ? historyReports?.length ?? 0 : 3)})
               </span>
               <svg
                 className={`w-4 h-4 text-gray-400 transition-transform ${
@@ -697,7 +842,7 @@ export default function ReviewPage() {
 
             {historyExpanded && (
               <>
-                {historyReports.length === 0 ? (
+                {(historyReports?.length ?? 0) === 0 ? (
                   <p className="text-xs text-gray-400">No previous reports.</p>
                 ) : (
                   (showMoreHistory
@@ -728,14 +873,14 @@ export default function ReviewPage() {
                     </div>
                   ))
                 )}
-                {historyReports.length > 3 && (
+                {(historyReports?.length ?? 0) > 3 && (
                   <button
                     onClick={() => setShowMoreHistory((v) => !v)}
                     className="mt-2 text-xs text-indigo-600 hover:text-indigo-800 transition"
                   >
                     {showMoreHistory
                       ? "Show less"
-                      : `Show ${historyReports.length - 3} more`}
+                      : `Show ${(historyReports?.length ?? 0) - 3} more`}
                   </button>
                 )}
               </>
@@ -852,6 +997,89 @@ export default function ReviewPage() {
                   </button>
                 )}
               </>
+            )}
+          </div>
+
+          {/* Free AI Model panel */}
+          <div className="bg-white rounded-lg border border-gray-200 shadow-sm p-4">
+            <button
+              onClick={() => {
+                setFreeModelExpanded((v) => !v);
+                setFreeModelParseStatus("idle");
+                setFreeModelError(null);
+              }}
+              className="flex items-center justify-between w-full text-sm font-semibold text-gray-700 mb-2"
+            >
+              <span>Free AI Model</span>
+              <svg
+                className={`w-4 h-4 text-gray-400 transition-transform ${
+                  freeModelExpanded ? "" : "-rotate-90"
+                }`}
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+                strokeWidth={2}
+              >
+                <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+              </svg>
+            </button>
+
+            {freeModelExpanded && (
+              <div className="space-y-3 pt-1">
+                <p className="text-xs text-gray-500">
+                  Paste this prompt into ChatGPT, Claude or Gemini (free tier):
+                </p>
+
+                <div className="flex justify-end">
+                  <button
+                    onClick={handleFreeModelCopy}
+                    disabled={!currentStudentId}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-gray-300 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed transition"
+                  >
+                    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                    </svg>
+                    {freeModelCopyStatus === "copied" ? "Copied!" : "Copy Prompt"}
+                  </button>
+                </div>
+
+                <div>
+                  <p className="text-xs text-gray-500 mb-1.5">Paste response:</p>
+                  <textarea
+                    value={freeModelPaste}
+                    onChange={(e) => {
+                      setFreeModelPaste(e.target.value);
+                      setFreeModelParseStatus("idle");
+                      setFreeModelError(null);
+                    }}
+                    rows={4}
+                    placeholder="Paste the AI response here..."
+                    className="w-full rounded-md border border-gray-300 px-2.5 py-2 text-xs text-gray-800 placeholder:text-gray-300 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none transition resize-none"
+                  />
+                </div>
+
+                {freeModelError && (
+                  <p className="text-xs text-red-600 bg-red-50 border border-red-200 rounded px-2.5 py-1.5">
+                    {freeModelError}
+                  </p>
+                )}
+
+                {freeModelParseStatus === "success" && (
+                  <p className="text-xs text-green-700 bg-green-50 border border-green-200 rounded px-2.5 py-1.5">
+                    Applied
+                  </p>
+                )}
+
+                <div className="flex justify-end">
+                  <button
+                    onClick={handleFreeModelParse}
+                    disabled={freeModelParseStatus === "parsing" || !freeModelPaste.trim()}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-gray-300 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed transition"
+                  >
+                    {freeModelParseStatus === "parsing" ? "Applying..." : "Parse & Apply"}
+                  </button>
+                </div>
+              </div>
             )}
           </div>
         </div>
@@ -989,18 +1217,24 @@ export default function ReviewPage() {
                 <button
                   onClick={() => setShowRedoConfirm(true)}
                   disabled={redoing}
-                  className="px-3 py-1.5 text-xs rounded border border-gray-300 text-gray-600 hover:bg-gray-50 disabled:opacity-50 transition"
+                  className={`px-3 py-1.5 text-xs rounded border font-medium transition disabled:opacity-50 ${
+                    filtersChangedSinceGenerate
+                      ? "border-indigo-600 text-indigo-600 bg-transparent hover:bg-indigo-50 animate-pulse"
+                      : "border-indigo-600 text-indigo-600 bg-transparent hover:bg-indigo-50"
+                  }`}
                 >
-                  {redoing ? "Regenerating..." : "Redo"}
+                  {redoing ? "Regenerating..." : filtersChangedSinceGenerate ? "Regenerate (filters changed)" : "Regenerate"}
                 </button>
                 <button
                   onClick={() =>
                     downloadWithAuth(
-                      `${API_BASE}/api/v1/sessions/${sessionId}/export/pdf`,
-                      "session_reports.zip"
+                      `/api/v1/reports/${currentReport.id}/export/pdf`,
+                      "report.pdf"
                     ).catch(() => {})
                   }
-                  className="px-3 py-1.5 text-xs rounded border border-gray-300 text-gray-600 hover:bg-gray-50 transition"
+                  disabled={currentReport.status !== "final"}
+                  title={currentReport.status !== "final" ? "Mark report as final to export PDF" : "Export this report as PDF"}
+                  className="px-3 py-1.5 text-xs rounded border border-gray-300 text-gray-600 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed transition"
                 >
                   Export PDF
                 </button>

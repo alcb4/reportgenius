@@ -2,8 +2,8 @@ import { NextRequest, NextResponse } from 'next/server'
 import { z } from 'zod'
 import { prisma } from '@/lib/prisma'
 import { authenticate } from '@/lib/authenticate'
-import { formatRatingSummary, buildPrompt } from '@/lib/adapters/llm/prompt-builder'
-import { ReportLength, ProgressionItem, TestContextItem } from '@/lib/adapters/llm/types'
+import { buildBatchPrompt, resolveTestInstructionFromConfig } from '@/lib/adapters/llm/prompt-builder'
+import { ReportLength, BatchStudentPayload, TestContextItem } from '@/lib/adapters/llm/types'
 
 export const dynamic = 'force-dynamic'
 
@@ -21,12 +21,6 @@ export async function GET(
   const { sessionId } = await params
 
   try {
-    const session = await prisma.reportSession.findFirst({
-      where: { id: sessionId, organization_id: user.organizationId },
-      select: { id: true, tone: true, length: true },
-    })
-    if (!session) return NextResponse.json({ error: 'Session not found', code: 'SESSION_NOT_FOUND' }, { status: 404 })
-
     const { searchParams } = new URL(req.url)
     const rawStudentIds = searchParams.getAll('studentIds')
     const flatIds = rawStudentIds.flatMap((s) => s.split(','))
@@ -45,9 +39,12 @@ export async function GET(
     const sessionFull = await prisma.reportSession.findFirst({
       where: { id: sessionId, organization_id: user.organizationId },
       select: {
-        tone: true, length: true, topics_covered: true, class_id: true, test_filters: true,
+        tone: true,
+        length: true,
+        topics_covered: true,
+        class_id: true,
+        test_filters: true,
         disciplines: { select: { id: true, name: true }, orderBy: { created_at: 'asc' } },
-        tests: { select: { id: true, name: true } },
       },
     })
     if (!sessionFull) return NextResponse.json({ error: 'Session not found', code: 'SESSION_NOT_FOUND' }, { status: 404 })
@@ -63,7 +60,38 @@ export async function GET(
 
     const disciplineIds = sessionFull.disciplines.map((d) => d.id)
 
-    const [allRatings, allTopicRatings] = await Promise.all([
+    const testFilters = (sessionFull.test_filters ?? {}) as Record<string, {
+      includeMark?: boolean
+      includePercentage?: boolean
+      includeGrade?: boolean
+      includeLowMention?: boolean
+    }>
+
+    // Derive included test IDs from test_filters keys (tests may be class-level with no session_id,
+    // so we query by ID directly rather than relying on the session→tests Prisma relation).
+    const configuredTestIds = Object.keys(testFilters)
+    const allIncludedTests = configuredTestIds.length > 0
+      ? await prisma.test.findMany({
+          where: { id: { in: configuredTestIds }, class_id: sessionFull.class_id },
+          select: { id: true, name: true, max_mark: true },
+        })
+      : []
+
+    // Rule 6 instruction derived from config — fires regardless of whether results exist yet
+    const testInstruction = resolveTestInstructionFromConfig(
+      testFilters,
+      allIncludedTests.map((t) => t.id)
+    )
+
+    // Only tests with score flags need DB results fetched
+    const scoredTestIds = allIncludedTests
+      .filter((t) => {
+        const f = testFilters[t.id]
+        return f && (f.includePercentage || f.includeGrade || f.includeLowMention || f.includeMark)
+      })
+      .map((t) => t.id)
+
+    const [allRatings, allTopicRatings, allTestResults] = await Promise.all([
       prisma.rating.findMany({
         where: { student_id: { in: studentIds }, session_discipline_id: { in: disciplineIds } },
         select: { student_id: true, score: true, comment: true, session_discipline: { select: { name: true } } },
@@ -73,8 +101,15 @@ export async function GET(
         select: { student_id: true, topic_name: true, score: true },
         orderBy: { topic_name: 'asc' },
       }),
+      scoredTestIds.length > 0
+        ? prisma.testResult.findMany({
+            where: { test_id: { in: scoredTestIds }, student_id: { in: studentIds } },
+            select: { test_id: true, student_id: true, score: true, calculated: true },
+          })
+        : Promise.resolve([]),
     ])
 
+    // Group fetched data by student
     const ratingsByStudent = new Map<string, typeof allRatings>()
     for (const r of allRatings) {
       const arr = ratingsByStudent.get(r.student_id) ?? []
@@ -89,45 +124,74 @@ export async function GET(
       topicsByStudent.set(tr.student_id, arr)
     }
 
-    const studentPrompts = students.map((student) => {
+    const testResultsByStudent = new Map<string, Map<string, { score: number; calculated: unknown }>>()
+    for (const tr of allTestResults) {
+      const byTest = testResultsByStudent.get(tr.student_id) ?? new Map()
+      byTest.set(tr.test_id, { score: tr.score, calculated: tr.calculated })
+      testResultsByStudent.set(tr.student_id, byTest)
+    }
+
+    // Preserve the order of studentIds as passed (deterministic batches)
+    const orderedStudents = studentIds
+      .map((id) => students.find((s) => s.id === id))
+      .filter((s): s is NonNullable<typeof s> => s !== undefined)
+
+    const batchPayloads: BatchStudentPayload[] = orderedStudents.map((student) => {
       const ratings = ratingsByStudent.get(student.id) ?? []
       const topicRatingRows = topicsByStudent.get(student.id) ?? []
+      const studentTestResults = testResultsByStudent.get(student.id)
 
-      const ratingSummary = formatRatingSummary(
-        ratings.map((r) => ({ disciplineName: r.session_discipline.name, score: r.score, comment: r.comment }))
-      )
+      const rawRatings = ratings.map((r) => ({
+        name: r.session_discipline.name,
+        score: r.score,
+        comment: r.comment,
+      }))
 
-      const topicRatings = topicRatingRows.length > 0
-        ? topicRatingRows.map((tr) => ({ topicName: tr.topic_name, score: tr.score }))
-        : undefined
+      const topicRatings =
+        topicRatingRows.length > 0
+          ? topicRatingRows.map((tr) => ({ topicName: tr.topic_name, score: tr.score }))
+          : undefined
 
-      return buildPrompt({
+      let testContext: TestContextItem[] | undefined
+      if (allIncludedTests.length > 0) {
+        const items: TestContextItem[] = []
+        for (const test of allIncludedTests) {
+          const filter = testFilters[test.id]
+          const isScored = filter.includePercentage || filter.includeGrade || filter.includeLowMention || filter.includeMark
+          if (isScored) {
+            const result = studentTestResults?.get(test.id)
+            if (!result) continue  // no result yet — skip from block (Rule 6 still fires via testInstruction)
+            const calc = result.calculated as { percentage: number; grade: string | null }
+            const item: TestContextItem = { testName: test.name }
+            if (filter.includePercentage || filter.includeLowMention) item.percentage = calc.percentage
+            if (filter.includeGrade) item.grade = calc.grade
+            if (filter.includeLowMention) item.lowMention = true
+            if (filter.includeMark) item.mark = `${result.score}/${test.max_mark}`
+            items.push(item)
+          } else {
+            // Qualitative only — always include with just test name; no result needed
+            items.push({ testName: test.name })
+          }
+        }
+        if (items.length > 0) testContext = items
+      }
+
+      return {
+        id: student.id,
         firstName: student.first_name,
         gender: student.gender ?? 'unspecified',
-        ratingSummary,
+        ratings: rawRatings,
         topics: sessionFull.topics_covered,
-        tone: sessionFull.tone,
-        length: sessionFull.length as ReportLength,
         topicRatings,
-      })
+        testContext,
+      }
     })
 
-    const studentSections = students
-      .map((student, i) => [`=== STUDENT ${student.id} ===`, studentPrompts[i]].join('\n'))
-      .join('\n\n')
-
-    const prompt = [
-      `You are a school teacher writing end-of-term report comments.`,
-      `Generate reports for ${students.length} student${students.length !== 1 ? 's' : ''}.`,
-      ``,
-      `CRITICAL INSTRUCTIONS:`,
-      `1. Respond ONLY with a valid JSON array. No other text before or after.`,
-      `2. Format: [{ "studentId": "<id>", "report": "<text>" }, ...]`,
-      `3. Include one object per student in the array.`,
-      `4. Follow the per-student instructions below EXACTLY for each student's report.`,
-      ``,
-      studentSections,
-    ].join('\n')
+    const prompt = buildBatchPrompt(batchPayloads, {
+      tone: sessionFull.tone,
+      length: sessionFull.length as ReportLength,
+      testInstruction,
+    })
 
     return NextResponse.json({ prompt })
   } catch (err) {

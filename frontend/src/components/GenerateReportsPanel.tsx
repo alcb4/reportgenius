@@ -33,6 +33,11 @@ interface ParseResult {
   error?: string;
 }
 
+interface ParseSummary {
+  saved: number;
+  failed: number;
+}
+
 interface GenerateReportsPanelProps {
   sessionId: string;
   students: Student[];
@@ -79,6 +84,7 @@ export default function GenerateReportsPanel({
     "idle" | "parsing" | "success" | "error"
   >("idle");
   const [parseResults, setParseResults] = useState<ParseResult[]>([]);
+  const [parseSummary, setParseSummary] = useState<ParseSummary | null>(null);
   const [parseError, setParseError] = useState<string | null>(null);
 
   // Bulk API generation state
@@ -105,7 +111,8 @@ export default function GenerateReportsPanel({
   }, [sessionId]);
 
   useEffect(() => {
-    loadExisting();
+    const t = setTimeout(() => { void loadExisting(); }, 0);
+    return () => clearTimeout(t);
   }, [loadExisting]);
 
   // ── Build initial batch whenever generatedStudentIds or students change ─────
@@ -116,7 +123,8 @@ export default function GenerateReportsPanel({
       .sort((a, b) =>
         studentDisplayName(a).localeCompare(studentDisplayName(b))
       );
-    setBatchStudents(remaining.slice(0, 5));
+    const t = setTimeout(() => { setBatchStudents(remaining.slice(0, 5)); }, 0);
+    return () => clearTimeout(t);
   }, [students, generatedStudentIds]);
 
   // ── New Batch — pick a different 5 from the remaining pool ─────────────────
@@ -193,6 +201,7 @@ export default function GenerateReportsPanel({
     setParseStatus("parsing");
     setParseError(null);
     setParseResults([]);
+    setParseSummary(null);
 
     try {
       interface ParseResponse {
@@ -212,19 +221,22 @@ export default function GenerateReportsPanel({
       );
 
       setParseResults(result.results);
+      // Use server-reported saved/failed counts — these reflect actual DB writes,
+      // not a local count derived from the response array length.
+      setParseSummary({ saved: result.saved, failed: result.failed });
       setParseStatus("success");
 
-      // Mark successfully saved students as generated
-      const saved = new Set(
+      // Mark successfully saved students as generated (driven by server results)
+      const savedIds = new Set(
         result.results.filter((r) => r.success).map((r) => r.studentId)
       );
       setGeneratedStudentIds((prev) => {
         const next = new Set(prev);
-        for (const id of saved) next.add(id);
+        for (const id of savedIds) next.add(id);
         return next;
       });
 
-      // Clear paste area on full success
+      // Clear paste area only when all reports saved without error
       if (result.failed === 0) {
         setPasteValue("");
       }
@@ -451,7 +463,23 @@ export default function GenerateReportsPanel({
               </div>
             )}
 
-            {/* Parse results */}
+            {/* Parse results — summary banner (server counts) + per-row detail */}
+            {parseSummary !== null && (
+              <div
+                className={`mb-3 flex items-center gap-3 px-4 py-2.5 rounded-md text-sm font-medium border ${
+                  parseSummary.failed === 0
+                    ? "bg-green-50 border-green-200 text-green-800"
+                    : parseSummary.saved === 0
+                    ? "bg-red-50 border-red-200 text-red-800"
+                    : "bg-yellow-50 border-yellow-200 text-yellow-800"
+                }`}
+              >
+                <span>Saved: {parseSummary.saved}</span>
+                {parseSummary.failed > 0 && (
+                  <span className="text-red-700">Failed: {parseSummary.failed}</span>
+                )}
+              </div>
+            )}
             {parseResults.length > 0 && (
               <div className="space-y-1">
                 {parseResults.map((r) => (

@@ -23,14 +23,14 @@ export async function GET(
     const reports = await prisma.report.findMany({
       where: { session_id: sessionId, organization_id: user.organizationId },
       select: {
-        id: true, status: true, word_count: true, edited_content: true,
+        id: true, student_id: true, status: true, word_count: true, edited_content: true,
         ratings_changed_at: true, created_at: true, updated_at: true,
         student: { select: { id: true, first_name: true, last_name: true, gender: true } },
       },
       orderBy: { created_at: 'desc' },
     })
 
-    return NextResponse.json({ data: reports })
+    return NextResponse.json({ reports })
   } catch (err) {
     console.error(err)
     return NextResponse.json({ error: 'Internal server error', code: 'INTERNAL_ERROR' }, { status: 500 })

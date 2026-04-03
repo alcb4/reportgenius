@@ -273,12 +273,11 @@ export default function ReportStudio({
       typeof window !== "undefined"
         ? window.localStorage.getItem("rg_token")
         : null;
-    const apiBase =
-      process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:3001";
+    // Use relative URL — routes through Next.js (same-origin), avoids CSP violation.
     const headers: Record<string, string> = {};
     if (token) headers["Authorization"] = `Bearer ${token}`;
     const res = await fetch(
-      `${apiBase}/api/v1/sessions/${sessionId}/export/pdf`,
+      `/api/v1/sessions/${sessionId}/export/pdf`,
       { headers }
     );
     if (!res.ok) {

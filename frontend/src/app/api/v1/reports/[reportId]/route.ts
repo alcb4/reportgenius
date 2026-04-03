@@ -30,9 +30,10 @@ export async function GET(
     const report = await prisma.report.findFirst({
       where: { id: reportId, organization_id: user.organizationId },
       select: {
-        id: true, status: true, word_count: true, edited_content: true,
-        llm_model: true, llm_prompt: true, ratings_changed_at: true,
-        created_at: true, updated_at: true,
+        id: true, student_id: true, session_id: true,
+        status: true, word_count: true, edited_content: true,
+        llm_model: true, llm_prompt: true, llm_raw_response: true,
+        ratings_changed_at: true, created_at: true, updated_at: true,
         student: { select: { id: true, first_name: true, last_name: true, gender: true } },
         session: { select: { id: true, name: true, tone: true, length: true } },
       },
@@ -40,7 +41,7 @@ export async function GET(
 
     if (!report) return NextResponse.json({ error: 'Report not found', code: 'REPORT_NOT_FOUND' }, { status: 404 })
 
-    return NextResponse.json({ data: report })
+    return NextResponse.json({ report })
   } catch (err) {
     console.error(err)
     return NextResponse.json({ error: 'Internal server error', code: 'INTERNAL_ERROR' }, { status: 500 })
@@ -84,12 +85,13 @@ export async function PUT(
       where: { id: reportId },
       data: updateData,
       select: {
-        id: true, status: true, word_count: true, edited_content: true,
-        created_at: true, updated_at: true,
+        id: true, student_id: true, session_id: true,
+        status: true, word_count: true, edited_content: true,
+        llm_raw_response: true, created_at: true, updated_at: true,
       },
     })
 
-    return NextResponse.json({ data: updated })
+    return NextResponse.json({ report: updated })
   } catch (err) {
     console.error(err)
     return NextResponse.json({ error: 'Internal server error', code: 'INTERNAL_ERROR' }, { status: 500 })
