@@ -57,7 +57,7 @@ export async function getOrCreateAliases(
   const allClassStudents = await prisma.student.findMany({
     where: { class_id: classId },
     select: { id: true },
-    orderBy: { first_name: 'asc' },
+    orderBy: [{ first_name: 'asc' }, { id: 'asc' }],
   })
   const allStudentIds = allClassStudents.map((s) => s.id)
 
