@@ -652,6 +652,17 @@ export default function ReviewPage() {
     );
   }
 
+  if (!sessionMeta) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+        <div className="animate-pulse space-y-4">
+          <div className="h-4 bg-gray-200 rounded w-32" />
+          <div className="h-6 bg-gray-200 rounded w-48" />
+        </div>
+      </div>
+    );
+  }
+
   if (!students.length) {
     return (
       <div className="min-h-screen bg-gray-50 flex items-center justify-center p-4">

@@ -189,6 +189,16 @@ export default function CompactFilterBar({
   onAddDiscipline?: () => void;
   isReadOnly?: boolean;
 }) {
+  // Guard: if session is null/undefined, render a minimal loading state
+  if (!session) {
+    return (
+      <div className="bg-white rounded-lg border border-gray-200 p-4 animate-pulse">
+        <div className="h-4 bg-gray-200 rounded w-24 mb-2" />
+        <div className="h-6 bg-gray-200 rounded w-32" />
+      </div>
+    );
+  }
+
   const [open, setOpen] = useState(false);
   const [testsExpandedRaw, setTestsExpandedRaw] = useState(false);
   const [showSelectTests, setShowSelectTests] = useState(false);

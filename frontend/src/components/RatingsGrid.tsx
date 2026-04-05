@@ -365,6 +365,20 @@ export default function RatingsGrid({
   onBulkBatchStarted,
   topics,
 }: RatingsGridProps) {
+  // Guard: render loading skeleton if no data yet
+  if (!students?.length && !disciplines?.length) {
+    return (
+      <div className="bg-white rounded-lg border border-gray-200 p-6 animate-pulse">
+        <div className="h-4 bg-gray-200 rounded w-24 mb-4" />
+        <div className="space-y-2">
+          <div className="h-8 bg-gray-100 rounded" />
+          <div className="h-8 bg-gray-100 rounded" />
+          <div className="h-8 bg-gray-100 rounded" />
+        </div>
+      </div>
+    );
+  }
+
   // ── Grid state ─────────────────────────────────────────────────────────────
 
   // Build initial grid from incoming student ratings
