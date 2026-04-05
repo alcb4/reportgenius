@@ -163,7 +163,7 @@ export async function GET(
       }),
     ])
 
-    return NextResponse.json({ students, disciplines })
+    return NextResponse.json({ students: students ?? [], disciplines: disciplines ?? [] })
   } catch (err) {
     console.error(err)
     return NextResponse.json({ error: 'Internal server error', code: 'INTERNAL_ERROR' }, { status: 500 })

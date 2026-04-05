@@ -885,7 +885,7 @@ export default function SessionDetailPage() {
         }
 
         setSession(sessionResult.data.session);
-        setDisciplines(sessionResult.data.disciplines ?? []);
+        setDisciplines(sessionResult.data?.disciplines ?? []);
         setClassMeta(classResult.data);
         setClassTests(testsResult.data);
 
@@ -929,8 +929,8 @@ export default function SessionDetailPage() {
           `/api/v1/sessions/${sessionId}/ratings`
         );
         if (!cancelled) {
-          setGridStudents(result.students);
-          setGridDisciplines(result.disciplines);
+          setGridStudents(result.students ?? []);
+          setGridDisciplines(result.disciplines ?? []);
         }
       } catch {
         // Non-fatal: grid will show 0/0 state
