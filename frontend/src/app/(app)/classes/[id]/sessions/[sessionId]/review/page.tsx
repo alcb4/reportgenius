@@ -214,6 +214,9 @@ export default function ReviewPage() {
   useEffect(() => {
     if (!sessionId || !classId) return;
     let cancelled = false;
+    let retryCount = 0;
+    const MAX_RETRIES = 3;
+    const RETRY_DELAY_MS = 800;
 
     async function loadAll() {
       try {
@@ -242,6 +245,12 @@ export default function ReviewPage() {
 
         const sessionData = sessionRes.data?.session;
         if (!sessionData) {
+          if (retryCount < MAX_RETRIES) {
+            retryCount++;
+            await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
+            if (!cancelled) loadAll();
+            return;
+          }
           setError("Failed to load session data.");
           setLoading(false);
           return;

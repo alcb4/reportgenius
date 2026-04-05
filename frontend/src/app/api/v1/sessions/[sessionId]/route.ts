@@ -52,7 +52,8 @@ export async function GET(
 
     if (!session) return NextResponse.json({ error: 'Session not found', code: 'SESSION_NOT_FOUND' }, { status: 404 })
 
-    const disciplineIds = session.disciplines.map((d) => d.id)
+    const sessionDisciplines = session.disciplines ?? []
+    const disciplineIds = sessionDisciplines.map((d) => d.id)
 
     const students = await prisma.student.findMany({
       where: { class_id: session.class_id, organization_id: user.organizationId },
@@ -66,7 +67,7 @@ export async function GET(
       orderBy: { first_name: 'asc' },
     })
 
-    return NextResponse.json({ data: { session, students, disciplines: session.disciplines } })
+    return NextResponse.json({ data: { session, students, disciplines: sessionDisciplines } })
   } catch (err) {
     console.error(err)
     return NextResponse.json({ error: 'Internal server error', code: 'INTERNAL_ERROR' }, { status: 500 })

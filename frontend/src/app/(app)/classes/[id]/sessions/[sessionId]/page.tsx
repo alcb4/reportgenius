@@ -858,6 +858,9 @@ export default function SessionDetailPage() {
   useEffect(() => {
     if (!sessionId || !classId) return;
     let cancelled = false;
+    let retryCount = 0;
+    const MAX_RETRIES = 3;
+    const RETRY_DELAY_MS = 800;
 
     async function load() {
       try {
@@ -867,8 +870,22 @@ export default function SessionDetailPage() {
           apiFetch<{ data: ClassTest[] }>(`/api/v1/classes/${classId}/tests`).catch(() => ({ data: [] as ClassTest[] })),
         ]);
         if (cancelled) return;
-        setSession(sessionResult.data?.session ?? null);
-        setDisciplines(sessionResult.data?.disciplines ?? []);
+
+        // Handle case where session is not found (race condition - session may not be ready yet)
+        if (!sessionResult.data?.session) {
+          if (retryCount < MAX_RETRIES) {
+            retryCount++;
+            await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
+            if (!cancelled) load();
+            return;
+          }
+          // Max retries exceeded - redirect to class page
+          if (!cancelled) router.replace(`/classes/${classId}`);
+          return;
+        }
+
+        setSession(sessionResult.data.session);
+        setDisciplines(sessionResult.data.disciplines ?? []);
         setClassMeta(classResult.data);
         setClassTests(testsResult.data);
 
