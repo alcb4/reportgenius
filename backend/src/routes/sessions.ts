@@ -25,7 +25,7 @@ const prisma = new PrismaClient();
 const CreateSessionSchema = z.object({
   name: z.string().min(1, "Session name is required").max(255),
   topics_covered: z.array(z.string()).optional().default([]),
-  tone: z.string().max(50).optional().default("balanced"),
+  tone: z.enum(["gentle", "balanced", "direct"]).optional().default("balanced"),
   length: z.enum(["short", "medium", "long"]).optional().default("medium"),
   // Template discipline IDs to add from the library.
   templateDisciplineIds: z.array(z.string().uuid()).optional().default([]),

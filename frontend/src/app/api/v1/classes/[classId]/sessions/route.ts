@@ -9,7 +9,7 @@ export const dynamic = 'force-dynamic'
 const CreateSessionSchema = z.object({
   name: z.string().min(1, 'Session name is required').max(255),
   topics_covered: z.array(z.string()).optional().default([]),
-  tone: z.string().max(50).optional().default('balanced'),
+  tone: z.enum(['gentle', 'balanced', 'direct']).optional().default('balanced'),
   length: z.enum(['short', 'medium', 'long']).optional().default('medium'),
   templateDisciplineIds: z.array(z.string().uuid()).optional().default([]),
   customDisciplines: z.array(z.object({

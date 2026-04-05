@@ -220,7 +220,7 @@ function CreateSessionModal({
   const [name, setName] = useState("");
   const [topics, setTopics] = useState<string[]>([]);
   const [length, setLength] = useState<"short" | "medium" | "long">("medium");
-  const [tone, setTone] = useState("professional");
+  const [tone, setTone] = useState<"gentle" | "balanced" | "direct">("balanced");
   const [templates, setTemplates] = useState<DisciplineGroup[]>([]);
   const [selectedTemplateIds, setSelectedTemplateIds] = useState<Set<string>>(new Set());
   const [customInput, setCustomInput] = useState("");
@@ -409,18 +409,28 @@ function CreateSessionModal({
 
             {/* Tone */}
             <div>
-              <label htmlFor="tone" className="block text-sm font-medium text-gray-700 mb-1">Tone</label>
-              <select
-                id="tone"
-                value={tone}
-                onChange={(e) => setTone(e.target.value)}
-                className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none transition"
-              >
-                <option value="professional">Professional</option>
-                <option value="encouraging">Encouraging</option>
-                <option value="formal">Formal</option>
-                <option value="warm">Warm</option>
-              </select>
+              <label className="block text-sm font-medium text-gray-700 mb-2">Tone</label>
+              <div className="flex gap-3">
+                {([
+                  { value: "gentle" as const, label: "Gentle", hint: "Positive language, focuses on strengths" },
+                  { value: "balanced" as const, label: "Balanced", hint: "Mix of praise and constructive feedback" },
+                  { value: "direct" as const, label: "Direct", hint: "Clear strengths + direct areas for improvement" },
+                ]).map((t) => (
+                  <button
+                    key={t.value}
+                    type="button"
+                    onClick={() => setTone(t.value)}
+                    title={t.hint}
+                    className={`flex-1 px-4 py-3 rounded-lg border text-sm font-medium transition text-center ${
+                      tone === t.value
+                        ? "border-indigo-500 bg-indigo-50 text-indigo-700"
+                        : "border-gray-200 text-gray-500 hover:border-gray-300 hover:text-gray-700"
+                    }`}
+                  >
+                    {tone === t.value ? "●" : "○"} {t.label}
+                  </button>
+                ))}
+              </div>
             </div>
 
             {/* Disciplines */}

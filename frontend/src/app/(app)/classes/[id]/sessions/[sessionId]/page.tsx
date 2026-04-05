@@ -867,8 +867,8 @@ export default function SessionDetailPage() {
           apiFetch<{ data: ClassTest[] }>(`/api/v1/classes/${classId}/tests`).catch(() => ({ data: [] as ClassTest[] })),
         ]);
         if (cancelled) return;
-        setSession(sessionResult.data.session);
-        setDisciplines(sessionResult.data.disciplines);
+        setSession(sessionResult.data?.session ?? null);
+        setDisciplines(sessionResult.data?.disciplines ?? []);
         setClassMeta(classResult.data);
         setClassTests(testsResult.data);
 

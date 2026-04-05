@@ -240,9 +240,16 @@ export default function ReviewPage() {
 
         if (cancelled) return;
 
-        setSessionMeta(sessionRes.data.session);
+        const sessionData = sessionRes.data?.session;
+        if (!sessionData) {
+          setError("Failed to load session data.");
+          setLoading(false);
+          return;
+        }
 
-        const fetchedClassId = sessionRes.data.session.class_id;
+        setSessionMeta(sessionData);
+
+        const fetchedClassId = sessionData.class_id;
 
         // Fetch class meta, tests, and progression in parallel (all non-fatal)
         await Promise.all([
@@ -258,8 +265,8 @@ export default function ReviewPage() {
         ]);
 
         // Use ratings response for students (has per-discipline scores)
-        setStudents(ratingsRes.students);
-        setDisciplines(ratingsRes.disciplines);
+        setStudents(ratingsRes.students ?? []);
+        setDisciplines(ratingsRes.disciplines ?? []);
 
         const map = new Map<string, SessionReport>();
         for (const r of reportsRes.reports) {
