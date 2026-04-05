@@ -1030,6 +1030,10 @@ export default function ReviewPage() {
                   Paste this prompt into ChatGPT, Claude or Gemini (free tier):
                 </p>
 
+                <p className="text-xs text-indigo-600 bg-indigo-50 border border-indigo-100 rounded-md px-2.5 py-1.5">
+                  Student names are replaced with temporary aliases for privacy during AI generation.
+                </p>
+
                 <div className="flex justify-end">
                   <button
                     onClick={handleFreeModelCopy}

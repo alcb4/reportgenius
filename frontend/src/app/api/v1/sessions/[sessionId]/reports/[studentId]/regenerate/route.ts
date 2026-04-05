@@ -7,6 +7,7 @@ import { buildPrompt, resolveTestInstructionFromConfig } from '@/lib/adapters/ll
 import { ReportLength, RawRating, ProgressionItem, TestContextItem } from '@/lib/adapters/llm/types'
 import { decryptApiKey } from '@/lib/encryption'
 import { rateLimitOrNull } from '@/lib/ratelimit'
+import { getOrCreateAliases, buildNameReplacementMap, buildAliasToNameMap, replaceAliasesInText } from '@/lib/services/alias.service'
 
 export const dynamic = 'force-dynamic'
 export const maxDuration = 60
@@ -241,7 +242,23 @@ export async function POST(
       contextNote,
     }
 
-    const promptText = buildPrompt(reportPrompt)
+    // Apply alias for privacy before sending to LLM
+    const aliasMap = await getOrCreateAliases(sessionId, session.class_id, [studentId])
+    const alias = aliasMap.studentIdToAlias.get(studentId) ?? student.first_name
+
+    // Fetch all session students for name→alias map
+    const sessionStudents = await prisma.student.findMany({
+      where: { class_id: session.class_id },
+      select: { id: true, first_name: true },
+    })
+    const nameToAlias = buildNameReplacementMap(sessionStudents, aliasMap)
+
+    const aliasedPrompt = {
+      ...reportPrompt,
+      firstName: alias,
+    }
+
+    const promptText = buildPrompt(aliasedPrompt, nameToAlias)
 
     // Resolve provider + API key from org DB settings (same source as Settings UI)
     const org = await prisma.organization.findUnique({
@@ -280,7 +297,9 @@ export async function POST(
     const rawResponse = await adapter.generateReport(reportPrompt)
     const durationMs = Date.now() - startMs
 
-    const cleanedResponse = sanitiseLlmResponse(rawResponse)
+    // Replace aliases back to real names in the LLM response
+    const aliasToName = buildAliasToNameMap(sessionStudents, aliasMap)
+    const cleanedResponse = sanitiseLlmResponse(replaceAliasesInText(rawResponse, aliasToName))
     const wordCount = cleanedResponse.trim().split(/\s+/).filter(Boolean).length
 
     // Upsert report

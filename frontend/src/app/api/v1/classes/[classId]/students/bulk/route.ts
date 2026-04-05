@@ -10,7 +10,7 @@ const BulkCreateStudentsSchema = z.object({
   students: z.array(
     z.object({
       first_name: z.string().min(1, 'first_name must be at least 1 character').max(100),
-      last_name: z.string().min(1, 'last_name must be at least 1 character').max(100),
+      last_name: z.string().max(100).optional().default(''),
       student_ref_id: z.string().max(100).nullable().optional(),
       gender: z.string().nullable().optional().transform((val) => {
         if (!val) return null

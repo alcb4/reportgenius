@@ -95,6 +95,7 @@ model Class {
   students     Student[]
   sessions     ReportSession[]
   tests        Test[]
+  aliases      SessionStudentAlias[]
 
   @@index([organization_id])
   @@map("classes")
@@ -121,6 +122,7 @@ model Student {
   reports      Report[]
   topicRatings TopicRating[]
   testResults  TestResult[]
+  aliases      SessionStudentAlias[]
 
   @@index([organization_id])
   @@index([class_id])
@@ -172,6 +174,7 @@ model ReportSession {
   reports      Report[]
   topicRatings TopicRating[]
   tests        Test[]
+  aliases      SessionStudentAlias[]
 
   @@index([organization_id])
   @@index([class_id])
@@ -256,4 +259,24 @@ model TopicRating {
   @@index([organization_id])
   @@index([session_id, student_id])
   @@map("topic_ratings")
+}
+
+// Session-scoped student aliases for privacy during AI generation.
+// Real names are replaced with Student_01, Student_02, etc. before
+// any prompt is sent to an external LLM or shown for copy/paste.
+model SessionStudentAlias {
+  id         String   @id @default(uuid()) @db.Uuid
+  session_id String   @db.Uuid
+  class_id   String   @db.Uuid
+  student_id String   @db.Uuid
+  alias      String   @db.VarChar(20)
+  created_at DateTime @default(now())
+
+  session  ReportSession @relation(fields: [session_id], references: [id], onDelete: Cascade)
+  class    Class         @relation(fields: [class_id], references: [id], onDelete: Cascade)
+  student  Student       @relation(fields: [student_id], references: [id], onDelete: Cascade)
+
+  @@unique([session_id, alias])
+  @@index([session_id, student_id])
+  @@map("session_student_aliases")
 }

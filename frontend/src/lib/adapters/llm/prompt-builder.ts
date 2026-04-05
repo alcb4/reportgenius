@@ -25,6 +25,7 @@ import {
   TestContextItem,
   LENGTH_WORD_RANGE,
 } from "./types";
+import { replaceNamesInText } from "../../services/alias.service";
 
 // ── Prompt injection defence ─────────────────────────────────────────────────
 
@@ -53,9 +54,13 @@ function sanitize(value: string): string {
 
 function resolvePronouns(gender: string | null | undefined): string {
   switch (gender?.toUpperCase()) {
-    case "M":  return "He/Him";
-    case "F":  return "She/Her";
-    case "N":  return "They/Them";
+    case "M":
+    case "MALE":  return "He/Him";
+    case "F":
+    case "FEMALE":  return "She/Her";
+    case "N":
+    case "OTHER":
+    case "NON-BINARY":  return "They/Them";
     default:   return "They/Them";
   }
 }
@@ -170,16 +175,23 @@ function buildHeader(
   tone: string,
   wordRange: { min: number; max: number },
   testInstruction: string | null,
-  hasProgression: boolean
+  hasProgression: boolean,
+  useAliases?: boolean
 ): string {
   const outputInstruction =
     mode === "individual"
       ? "Write a report for 1 student. Respond with the report text only.\nNo labels, no JSON, no extra commentary."
-      : `Write reports for ${studentCount} student${studentCount !== 1 ? "s" : ""}. Respond ONLY with a valid JSON array.\nNo text before or after the array.\nFormat: [{ "studentId": "<id>", "report": "<text>" }, ...]\nOne object per student. Any non-JSON output will break the system.`;
+      : useAliases
+        ? `Write reports for ${studentCount} student${studentCount !== 1 ? "s" : ""}. Respond ONLY with a valid JSON array.\nNo text before or after the array.\nFormat: [{ "alias": "Student_01", "report": "<text>" }, ...]\nOne object per student. Use the alias exactly as provided in each student block.\nAny non-JSON output will break the system.`
+        : `Write reports for ${studentCount} student${studentCount !== 1 ? "s" : ""}. Respond ONLY with a valid JSON array.\nNo text before or after the array.\nFormat: [{ "studentId": "<id>", "report": "<text>" }, ...]\nOne object per student. Any non-JSON output will break the system.`;
 
   const rules: string[] = [
     `1. WORD COUNT`,
-    `   Write between ${wordRange.min} and ${wordRange.max} words per report.`,
+    `   Target ${wordRange.min} to ${wordRange.max} words per report if sufficient topic data is provided.`,
+    `   FLEXIBILITY: If only basic discipline data is provided (with no specific subjects/topics),`,
+    `   prioritize natural, concise writing over hitting the minimum word count.`,
+    `   Do NOT write repetitive fluff or filler just to reach ${wordRange.min} words;`,
+    `   a shorter report is preferred in this case.`,
     `   Do not exceed ${wordRange.max} words under any circumstances.`,
     ``,
     `2. TONE`,
@@ -190,7 +202,8 @@ function buildHeader(
     `   Start directly with the report text.`,
     `   2–3 paragraphs separated by blank lines. No bullet points.`,
     `   Cover these three areas across the paragraphs: classroom character`,
-    `   and engagement, academic performance with specific topic references,`,
+    `   and engagement, academic performance (referencing specific topics ONLY`,
+    `   if they are explicitly provided in the student's data),`,
     `   and where relevant a grounded forward-looking observation. Vary the`,
     `   paragraph structure naturally between students — do not apply the`,
     `   same opening or sequence to every report.`,
@@ -204,10 +217,15 @@ function buildHeader(
     `   (never write "Behaviour", "Homework", "Participation" etc).`,
     `   Do NOT mention numeric scores.`,
     ``,
-    `5. TOPICS`,
+    `5. TOPICS & ANTI-HALLUCINATION`,
     `   Each student has topic scores on the same 1–5 scale as disciplines.`,
     `   Where topic scores differ notably from one another, acknowledge`,
     `   the contrast naturally in prose. Never mention numeric scores directly.`,
+    `   CRITICAL: If no specific subjects or topics are provided in the student`,
+    `   data, expand on their discipline traits (like confidence and independence).`,
+    `   Do NOT invent, assume, or hallucinate subjects, curriculum topics (e.g.`,
+    `   history, math, science), or specific classroom activities to fill the`,
+    `   word count.`,
   ];
 
   // Rule 6 — TESTS (omit entirely when no tests; subsequent rules shift)
@@ -244,6 +262,20 @@ function buildHeader(
     );
   }
 
+  if (useAliases) {
+    const lastRule = hasProgression ? qualityRule + 2 : qualityRule + 1;
+    rules.push(
+      ``,
+      `${lastRule}. PRIVACY — STUDENT ALIASES`,
+      `   Students are identified by aliases (Student_01, Student_02, etc.).`,
+      `   Use the provided student aliases exactly as written.`,
+      `   Do not output real names.`,
+      `   Do not invent new aliases.`,
+      `   Return structured JSON in this format:`,
+      `   [{"alias":"Student_01","report":"..."}, ...]`
+    );
+  }
+
   return [
     `You are a school teacher writing end-of-term report card comments.`,
     ``,
@@ -273,7 +305,8 @@ function buildStudentBlock(
   },
   index: number,
   total: number,
-  tone: string
+  tone: string,
+  nameToAlias?: Map<string, string>
 ): string {
   const lines: string[] = [
     `=== STUDENT ${index} of ${total} ===`,
@@ -286,7 +319,10 @@ function buildStudentBlock(
   if (student.ratings.length > 0) {
     lines.push(``, `Disciplines:`);
     for (const r of student.ratings) {
-      const comment = r.comment ? sanitize(r.comment) : null;
+      let comment = r.comment ? sanitize(r.comment) : null;
+      if (comment && nameToAlias) {
+        comment = replaceNamesInText(comment, nameToAlias);
+      }
       const note = comment ? ` — ${comment}` : "";
       lines.push(`  - ${sanitize(r.name)}: ${r.score}/5${note}`);
     }
@@ -312,10 +348,20 @@ function buildStudentBlock(
     for (const tc of student.testContext) {
       const parts: string[] = [];
       if (tc.percentage !== undefined) parts.push(`${tc.percentage}%`);
-      if (tc.grade) parts.push(`Grade: ${sanitize(tc.grade)}`);
-      if (tc.mark) parts.push(sanitize(tc.mark));
+      if (tc.grade) {
+        let grade = sanitize(tc.grade);
+        if (nameToAlias) grade = replaceNamesInText(grade, nameToAlias);
+        parts.push(`Grade: ${grade}`);
+      }
+      if (tc.mark) {
+        let mark = sanitize(tc.mark);
+        if (nameToAlias) mark = replaceNamesInText(mark, nameToAlias);
+        parts.push(mark);
+      }
+      let testName = sanitize(tc.testName);
+      if (nameToAlias) testName = replaceNamesInText(testName, nameToAlias);
       const scorePart = parts.length > 0 ? ` — ${parts.join(" | ")}` : "";
-      lines.push(`  - "${sanitize(tc.testName)}"${scorePart}`);
+      lines.push(`  - "${testName}"${scorePart}`);
     }
   }
 
@@ -329,7 +375,9 @@ function buildStudentBlock(
 
   // Additional teacher-provided context (class overview, custom note)
   if (student.contextNote) {
-    lines.push(``, `Additional context:`, `  ${sanitize(student.contextNote)}`);
+    let context = sanitize(student.contextNote);
+    if (nameToAlias) context = replaceNamesInText(context, nameToAlias);
+    lines.push(``, `Additional context:`, `  ${context}`);
   }
 
   return lines.join("\n");
@@ -341,10 +389,8 @@ function buildStudentBlock(
  * Build the complete prompt for individual hosted-LLM mode.
  * Part 1 (header with all rules) + Part 2 (single student block).
  */
-export function buildPrompt(payload: ReportPrompt): string {
+export function buildPrompt(payload: ReportPrompt, nameToAlias?: Map<string, string>): string {
   const wordRange = LENGTH_WORD_RANGE[payload.length];
-  // Use pre-computed instruction from caller (config-driven). Falls back to
-  // undefined check so null (explicit "no tests") is respected.
   const testInstruction =
     payload.testInstruction !== undefined ? payload.testInstruction : null;
   const hasProgression = (payload.progression?.length ?? 0) > 0;
@@ -360,7 +406,7 @@ export function buildPrompt(payload: ReportPrompt): string {
 
   const block = buildStudentBlock(
     {
-      id: "N/A", // not surfaced in individual mode — no JSON needed
+      id: "N/A",
       firstName: payload.firstName,
       gender: payload.gender,
       ratings: payload.ratings,
@@ -372,7 +418,8 @@ export function buildPrompt(payload: ReportPrompt): string {
     },
     1,
     1,
-    payload.tone
+    payload.tone,
+    nameToAlias
   );
 
   return `${header}\n\n${block}`;
@@ -385,11 +432,14 @@ export function buildPrompt(payload: ReportPrompt): string {
  */
 export function buildBatchPrompt(
   students: BatchStudentPayload[],
-  config: BatchSessionConfig
+  config: BatchSessionConfig,
+  options?: { useAliases?: boolean; nameToAlias?: Map<string, string> }
 ): string {
   const wordRange = LENGTH_WORD_RANGE[config.length];
   const testInstruction = config.testInstruction;
   const hasProgression = students.some((s) => (s.progression?.length ?? 0) > 0);
+  const useAliases = options?.useAliases ?? false;
+  const nameToAlias = options?.nameToAlias;
 
   const header = buildHeader(
     "batch",
@@ -397,7 +447,8 @@ export function buildBatchPrompt(
     config.tone,
     wordRange,
     testInstruction,
-    hasProgression
+    hasProgression,
+    useAliases
   );
 
   const blocks = students
@@ -415,7 +466,8 @@ export function buildBatchPrompt(
         },
         i + 1,
         students.length,
-        config.tone
+        config.tone,
+        nameToAlias
       )
     )
     .join("\n\n");

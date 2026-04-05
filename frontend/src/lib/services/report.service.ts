@@ -4,6 +4,7 @@ import { createLLMAdapter } from '@/lib/adapters/llm/factory'
 import { buildPrompt, resolveTestInstructionFromConfig } from '@/lib/adapters/llm/prompt-builder'
 import { ReportLength, RawRating, ProgressionItem, TestContextItem } from '@/lib/adapters/llm/types'
 import { decryptApiKey } from '@/lib/encryption'
+import { getOrCreateAliases, buildNameReplacementMap, buildAliasToNameMap, replaceAliasesInText } from '@/lib/services/alias.service'
 
 export interface GenerateReportOptions {
   tone: string
@@ -322,12 +323,31 @@ export async function generateSingleReport(
     testInstruction,
   }
 
-  const promptText = buildPrompt(reportPrompt)
+  // Apply alias for privacy before sending to LLM
+  const aliasMap = await getOrCreateAliases(sessionId, session.class_id, [studentId])
+  const alias = aliasMap.studentIdToAlias.get(studentId) ?? student.first_name
+
+  // Fetch all session students for name→alias map
+  const sessionStudents = await prisma.student.findMany({
+    where: { class_id: session.class_id },
+    select: { id: true, first_name: true },
+  })
+  const nameToAlias = buildNameReplacementMap(sessionStudents, aliasMap)
+
+  const aliasedPrompt = {
+    ...reportPrompt,
+    firstName: alias,
+  }
+
+  const promptText = buildPrompt(aliasedPrompt, nameToAlias)
 
   const adapter = createLLMAdapter(provider, apiKey)
 
   const rawResponse = await adapter.generateReport(reportPrompt)
-  const cleanedResponse = sanitiseLlmResponse(rawResponse)
+
+  // Replace aliases back to real names in the LLM response
+  const aliasToName = buildAliasToNameMap(sessionStudents, aliasMap)
+  const cleanedResponse = sanitiseLlmResponse(replaceAliasesInText(rawResponse, aliasToName))
   const words = countWords(cleanedResponse)
 
   const saved = await prisma.report.create({

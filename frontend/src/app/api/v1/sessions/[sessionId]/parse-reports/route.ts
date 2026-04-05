@@ -3,6 +3,7 @@ import { z } from 'zod'
 import { prisma } from '@/lib/prisma'
 import { authenticate } from '@/lib/authenticate'
 import { rateLimitOrNull } from '@/lib/ratelimit'
+import { getAliasMap, validateAndRemapResponse, buildAliasToNameMap, replaceAliasesInText } from '@/lib/services/alias.service'
 
 export const dynamic = 'force-dynamic'
 
@@ -58,64 +59,33 @@ export async function POST(
     })
     const studentMap = new Map(students.map((s) => [s.id, s]))
 
-    // Strip markdown fences and extract JSON array
-    let cleaned = raw.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim()
-    const firstBracket = cleaned.indexOf('[')
-    const lastBracket = cleaned.lastIndexOf(']')
+    // Get alias map for this session and remap LLM response
+    const aliasMap = await getAliasMap(sessionId)
+    const validation = validateAndRemapResponse(raw, aliasMap, studentIds)
 
-    if (firstBracket === -1 || lastBracket === -1 || lastBracket <= firstBracket) {
-      return NextResponse.json(
-        {
-          error: 'Could not parse response as JSON',
-          hint: 'The response must contain a JSON array [ ... ]. Make sure you copied the full response from the AI tool.',
-          code: 'PARSE_ERROR',
-        },
-        { status: 422 }
-      )
-    }
-
-    cleaned = cleaned.slice(firstBracket, lastBracket + 1)
-
-    let items: unknown
-    try {
-      items = JSON.parse(cleaned)
-    } catch {
-      return NextResponse.json(
-        {
-          error: 'Could not parse response as JSON',
-          hint: 'The JSON was malformed. Try copying the response again — make sure no text is cut off.',
-          code: 'PARSE_ERROR',
-        },
-        { status: 422 }
-      )
-    }
-
-    if (!Array.isArray(items)) {
-      return NextResponse.json(
-        {
-          error: 'Response is not a JSON array',
-          hint: 'Expected a JSON array like: [{ "studentId": "...", "report": "..." }]',
-          code: 'PARSE_ERROR',
-        },
-        { status: 422 }
-      )
-    }
+    // Build alias→name map for replacing aliases back to real names in report text
+    const allClassStudents = await prisma.student.findMany({
+      where: { class_id: (await prisma.reportSession.findFirst({
+        where: { id: sessionId },
+        select: { class_id: true },
+      }))?.class_id },
+      select: { id: true, first_name: true },
+    })
+    const aliasToName = buildAliasToNameMap(allClassStudents, aliasMap)
 
     // Guard: reject if the parsed array itself exceeds the per-batch cap.
-    // This prevents a crafted payload that passes the studentIds length check
-    // but embeds thousands of items in the JSON body, causing an unbounded loop.
-    if (items.length > MAX_REPORTS_PER_BATCH) {
+    if (validation.reports.length + validation.errors.length > MAX_REPORTS_PER_BATCH) {
       console.warn(JSON.stringify({
         event: 'parse_reports.input_too_large',
         sessionId,
         organizationId: user.organizationId,
-        itemsReceived: items.length,
+        itemsReceived: validation.reports.length + validation.errors.length,
         rawLengthChars: raw.length,
         cap: MAX_REPORTS_PER_BATCH,
       }))
       return NextResponse.json(
         {
-          error: `Input exceeds maximum allowed size — received ${items.length} report items, maximum is ${MAX_REPORTS_PER_BATCH}`,
+          error: `Input exceeds maximum allowed size — received ${validation.reports.length + validation.errors.length} report items, maximum is ${MAX_REPORTS_PER_BATCH}`,
           code: 'INPUT_TOO_LARGE',
         },
         { status: 422 }
@@ -133,50 +103,43 @@ export async function POST(
     let savedCount = 0
     let failedCount = 0
 
-    for (const item of items) {
-      if (
-        item === null ||
-        typeof item !== 'object' ||
-        !('studentId' in item) ||
-        !('report' in item) ||
-        typeof (item as Record<string, unknown>)['studentId'] !== 'string' ||
-        typeof (item as Record<string, unknown>)['report'] !== 'string'
-      ) {
-        failedCount++
-        results.push({ studentId: 'unknown', name: 'Unknown', success: false, error: 'Invalid item structure — missing studentId or report' })
-        continue
-      }
+    // Process validation errors
+    for (const err of validation.errors) {
+      failedCount++
+      const sid = err.studentId ?? 'unknown'
+      const student = studentMap.get(sid)
+      results.push({
+        studentId: sid,
+        name: student?.first_name ?? err.alias ?? 'Unknown',
+        success: false,
+        error: err.error,
+      })
+    }
 
-      const typedItem = item as { studentId: string; report: string }
-      const student = studentMap.get(typedItem.studentId)
-
+    // Save remapped reports
+    for (const remapped of validation.reports) {
+      const student = studentMap.get(remapped.studentId)
       if (!student) {
         failedCount++
-        results.push({ studentId: typedItem.studentId, name: typedItem.studentId, success: false, error: 'Student ID not found in this session' })
+        results.push({ studentId: remapped.studentId, name: 'Unknown', success: false, error: 'Student not found after remap' })
         continue
       }
 
-      if (!studentIds.includes(typedItem.studentId)) {
+      if (!studentIds.includes(remapped.studentId)) {
         failedCount++
-        results.push({ studentId: typedItem.studentId, name: student.first_name, success: false, error: 'Student ID not in the requested batch' })
+        results.push({ studentId: remapped.studentId, name: student.first_name, success: false, error: 'Student not in the requested batch' })
         continue
       }
 
-      const reportText = typedItem.report.trim()
-      if (!reportText) {
-        failedCount++
-        results.push({ studentId: typedItem.studentId, name: student.first_name, success: false, error: 'Empty report text' })
-        continue
-      }
-
+      const reportText = replaceAliasesInText(remapped.report, aliasToName)
       const wordCount = reportText.split(/\s+/).filter(Boolean).length
 
       try {
         const upserted = await prisma.report.upsert({
-          where: { session_id_student_id: { session_id: sessionId, student_id: typedItem.studentId } },
+          where: { session_id_student_id: { session_id: sessionId, student_id: remapped.studentId } },
           create: {
             organization_id: user.organizationId,
-            student_id: typedItem.studentId,
+            student_id: remapped.studentId,
             session_id: sessionId,
             anonymous_token: student.anonymous_token,
             llm_model: 'free_model',
@@ -199,16 +162,16 @@ export async function POST(
         console.log(JSON.stringify({
           event: 'parse_reports.upsert_success',
           sessionId,
-          studentId: typedItem.studentId,
+          studentId: remapped.studentId,
           reportId: upserted.id,
           organizationId: user.organizationId,
         }))
 
         savedCount++
-        results.push({ studentId: typedItem.studentId, name: student.first_name, success: true })
+        results.push({ studentId: remapped.studentId, name: student.first_name, success: true })
       } catch (dbErr) {
         failedCount++
-        results.push({ studentId: typedItem.studentId, name: student.first_name, success: false, error: 'Database error saving report' })
+        results.push({ studentId: remapped.studentId, name: student.first_name, success: false, error: 'Database error saving report' })
         console.error(dbErr)
       }
     }
@@ -219,9 +182,17 @@ export async function POST(
       organizationId: user.organizationId,
       saved: savedCount,
       failed: failedCount,
+      flaggedForReview: validation.flaggedForReview,
+      reviewReasons: validation.reviewReasons,
     }))
 
-    return NextResponse.json({ results, saved: savedCount, failed: failedCount })
+    return NextResponse.json({
+      results,
+      saved: savedCount,
+      failed: failedCount,
+      flaggedForReview: validation.flaggedForReview,
+      reviewReasons: validation.reviewReasons,
+    })
   } catch (err) {
     console.error(err)
     return NextResponse.json({ error: 'Internal server error', code: 'INTERNAL_ERROR' }, { status: 500 })

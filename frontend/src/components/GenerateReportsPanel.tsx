@@ -423,6 +423,10 @@ export default function GenerateReportsPanel({
               and paste it below.
             </p>
 
+            <p className="text-xs text-indigo-600 bg-indigo-50 border border-indigo-100 rounded-md px-3 py-2 mb-4">
+              Student names are replaced with temporary aliases for privacy during AI generation.
+            </p>
+
             {/* Paste area */}
             <textarea
               value={pasteValue}

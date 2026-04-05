@@ -4,6 +4,7 @@ import { prisma } from '@/lib/prisma'
 import { authenticate } from '@/lib/authenticate'
 import { buildBatchPrompt, resolveTestInstructionFromConfig } from '@/lib/adapters/llm/prompt-builder'
 import { ReportLength, BatchStudentPayload, TestContextItem } from '@/lib/adapters/llm/types'
+import { getOrCreateAliases, buildNameReplacementMap } from '@/lib/services/alias.service'
 
 export const dynamic = 'force-dynamic'
 
@@ -136,6 +137,16 @@ export async function GET(
       .map((id) => students.find((s) => s.id === id))
       .filter((s): s is NonNullable<typeof s> => s !== undefined)
 
+    // Generate session-scoped aliases for privacy
+    const aliasMap = await getOrCreateAliases(sessionId, sessionFull.class_id, studentIds)
+
+    // Fetch all class students to build name→alias map for free-text replacement
+    const classStudents = await prisma.student.findMany({
+      where: { class_id: sessionFull.class_id },
+      select: { id: true, first_name: true },
+    })
+    const nameToAlias = buildNameReplacementMap(classStudents, aliasMap)
+
     const batchPayloads: BatchStudentPayload[] = orderedStudents.map((student) => {
       const ratings = ratingsByStudent.get(student.id) ?? []
       const topicRatingRows = topicsByStudent.get(student.id) ?? []
@@ -178,7 +189,7 @@ export async function GET(
 
       return {
         id: student.id,
-        firstName: student.first_name,
+        firstName: aliasMap.studentIdToAlias.get(student.id) ?? student.first_name,
         gender: student.gender ?? 'unspecified',
         ratings: rawRatings,
         topics: sessionFull.topics_covered,
@@ -191,7 +202,7 @@ export async function GET(
       tone: sessionFull.tone,
       length: sessionFull.length as ReportLength,
       testInstruction,
-    })
+    }, { useAliases: true, nameToAlias })
 
     return NextResponse.json({ prompt })
   } catch (err) {

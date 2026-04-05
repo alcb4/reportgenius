@@ -639,8 +639,7 @@ function AddStudentRow({
     setError(null);
     setLoading(true);
     try {
-      interface AddStudentResponse { student: Student }
-      const result = await apiFetch<AddStudentResponse>(`/api/v1/classes/${classId}/students`, {
+      const result = await apiFetch<{ data: Student }>(`/api/v1/classes/${classId}/students`, {
         method: "POST",
         body: {
           first_name: firstName.trim(),
@@ -649,7 +648,7 @@ function AddStudentRow({
           gender: gender.trim() || undefined,
         },
       });
-      onAdded(result.student);
+      onAdded(result.data);
     } catch (err) {
       setError(err instanceof APIError ? err.message : "Failed to add student.");
       setLoading(false);
@@ -753,8 +752,7 @@ function EditStudentRow({
     setError(null);
     setLoading(true);
     try {
-      interface UpdateStudentResponse { student: Student }
-      const result = await apiFetch<UpdateStudentResponse>(`/api/v1/students/${student.id}`, {
+      const result = await apiFetch<{ data: Student }>(`/api/v1/students/${student.id}`, {
         method: "PUT",
         body: {
           first_name: firstName.trim(),
@@ -763,7 +761,7 @@ function EditStudentRow({
           gender: gender || null,
         },
       });
-      onSaved(result.student);
+      onSaved(result.data);
     } catch (err) {
       setError(err instanceof APIError ? err.message : "Failed to update student.");
       setLoading(false);
@@ -855,6 +853,42 @@ function BulkAddModal({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Field selection checkboxes
+  const [fields, setFields] = useState({
+    firstName: true,
+    lastName: true,
+    refId: true,
+    gender: true,
+  });
+
+  const activeFieldCount = [fields.firstName, fields.lastName, fields.refId, fields.gender].filter(Boolean).length;
+
+  const placeholder = (() => {
+    const examples = [
+      fields.firstName ? "Alan" : null,
+      fields.lastName ? "Davies" : null,
+      fields.refId ? "0001" : null,
+      fields.gender ? "M" : null,
+    ].filter(Boolean);
+    const examples2 = [
+      fields.firstName ? "Emma" : null,
+      fields.lastName ? "Thompson" : null,
+      fields.refId ? "0002" : null,
+      fields.gender ? "F" : null,
+    ].filter(Boolean);
+    return `${examples.join(",")}\n${examples2.join(",")}`;
+  })();
+
+  const fieldOrder = [
+    { key: "firstName" as const, label: "First Name", required: true },
+    { key: "lastName" as const, label: "Last Name", required: false },
+    { key: "refId" as const, label: "Ref ID", required: false },
+    { key: "gender" as const, label: "Gender", required: false },
+  ];
+
+  const activeFields = fieldOrder.filter((f) => fields[f.key]);
+  const formatHint = activeFields.map((f) => f.label.toLowerCase().replace(" ", "_")).join(", ");
+
   async function handleSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
 
@@ -869,18 +903,23 @@ function BulkAddModal({
     const skipped: number[] = [];
     const students = lines.reduce<{ first_name: string; last_name: string; student_ref_id?: string | null; gender?: string | null }[]>((acc, line, idx) => {
       const parts = line.split(",").map((p) => p.trim());
-      const first_name = parts[0] ?? "";
-      const last_name = parts[1] ?? "";
 
-      if (!first_name || !last_name) {
+      const getField = (fieldKey: string): string => {
+        const fieldIdx = activeFields.findIndex((f) => f.key === fieldKey);
+        return (parts[fieldIdx] ?? "").trim();
+      };
+
+      const first_name = getField("firstName");
+      if (!first_name) {
         skipped.push(idx + 1);
         return acc;
       }
 
-      const rawId = parts[2] ?? "";
+      const last_name = fields.lastName ? getField("lastName") : "";
+      const rawId = fields.refId ? getField("refId") : "";
       const student_ref_id = rawId || null;
 
-      const rawGender = (parts[3] ?? "").toUpperCase();
+      const rawGender = fields.gender ? getField("gender").toUpperCase() : "";
       const gender =
         rawGender === "M" ? "M" :
         rawGender === "F" ? "F" :
@@ -892,12 +931,12 @@ function BulkAddModal({
     }, []);
 
     if (students.length === 0) {
-      setError("No valid students found. Each row needs at least first name and last name.");
+      setError("No valid students found. Each row needs at least a first name.");
       return;
     }
 
     const warningMsg = skipped.length > 0
-      ? `Rows ${skipped.join(", ")} skipped (missing first or last name). `
+      ? `Rows ${skipped.join(", ")} skipped (missing first name). `
       : "";
 
     setError(null);
@@ -929,13 +968,38 @@ function BulkAddModal({
         </div>
         <form onSubmit={handleSubmit} noValidate>
           <div className="px-6 py-5 space-y-4">
-            <p className="text-sm text-gray-500">Paste one student per line as CSV: <span className="font-mono">first_name, last_name, student_id, gender</span>. Student ID and gender are optional. Gender: M / F / Other. Maximum 100 at once.</p>
+            {/* Field selection checkboxes */}
+            <div>
+              <label className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2 block">Fields to enter</label>
+              <div className="flex flex-wrap gap-4">
+                {fieldOrder.map((f) => (
+                  <label key={f.key} className="flex items-center gap-1.5 text-sm text-gray-700 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={fields[f.key]}
+                      onChange={(e) => {
+                        if (f.key === "firstName") return; // always on
+                        setFields((prev) => ({ ...prev, [f.key]: e.target.checked }));
+                      }}
+                      disabled={f.key === "firstName"}
+                      className="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500 disabled:opacity-40"
+                    />
+                    {f.label}
+                    {f.required && <span className="text-xs text-gray-400">(always)</span>}
+                  </label>
+                ))}
+              </div>
+            </div>
+
+            <p className="text-sm text-gray-500">
+              Paste one student per line. Format: <span className="font-mono text-xs bg-gray-100 px-1.5 py-0.5 rounded">{formatHint}</span>.
+              {activeFieldCount === 1 ? " One value per line." : " Separate values with commas."} Maximum 100 at once.
+            </p>
             <textarea
               value={text}
               onChange={(e) => setText(e.target.value)}
               rows={10}
-              placeholder={"Alan,Davies,0001,M\nEmma,Thompson,0002,F\nJames,Carter,,"}
-
+              placeholder={placeholder}
               className="w-full rounded-md border border-gray-300 px-3 py-2 text-sm font-mono focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none transition resize-y"
             />
             {error && (
@@ -1708,13 +1772,16 @@ function ClassDetailSkeleton() {
       <div className="h-4 bg-gray-200 rounded w-48 mb-2" />
       <div className="h-8 bg-gray-200 rounded w-1/3" />
       <div className="h-4 bg-gray-100 rounded w-1/4" />
-      <div className="bg-white rounded-lg border border-gray-200 p-6 space-y-3">
-        <div className="h-5 bg-gray-200 rounded w-1/4" />
-        {[1, 2, 3].map((n) => <div key={n} className="h-10 bg-gray-100 rounded" />)}
-      </div>
-      <div className="bg-white rounded-lg border border-gray-200 p-6 space-y-3">
-        <div className="h-5 bg-gray-200 rounded w-1/4" />
-        {[1, 2].map((n) => <div key={n} className="h-20 bg-gray-100 rounded" />)}
+      <div className="bg-white rounded-lg border border-gray-200 p-0">
+        <div className="border-b border-gray-200 px-6 py-3 flex gap-6">
+          <div className="h-5 bg-gray-200 rounded w-24" />
+          <div className="h-5 bg-gray-200 rounded w-20" />
+          <div className="h-5 bg-gray-200 rounded w-28" />
+        </div>
+        <div className="p-6 space-y-3">
+          <div className="h-5 bg-gray-200 rounded w-1/4" />
+          {[1, 2, 3].map((n) => <div key={n} className="h-10 bg-gray-100 rounded" />)}
+        </div>
       </div>
     </div>
   );
@@ -1750,6 +1817,13 @@ export default function ClassDetailPage() {
   const [sortField, setSortField] = useState<'first_name' | 'last_name' | 'student_ref_id' | null>(null);
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('asc');
 
+  // Tab state
+  type TabKey = 'sessions' | 'students' | 'tests';
+  const [activeTab, setActiveTab] = useState<TabKey>('sessions');
+
+  // Student search state
+  const [studentSearch, setStudentSearch] = useState('');
+
   function handleSortHeader(field: 'first_name' | 'last_name' | 'student_ref_id') {
     if (sortField !== field) {
       setSortField(field);
@@ -1764,7 +1838,14 @@ export default function ClassDetailPage() {
   }
 
   const sortedStudents = useMemo(() => {
-    const students = cls?.students ?? [];
+    let students = cls?.students ?? [];
+    if (studentSearch.trim()) {
+      const q = studentSearch.toLowerCase();
+      students = students.filter((s) =>
+        s.first_name.toLowerCase().includes(q) ||
+        (s.last_name ?? '').toLowerCase().includes(q)
+      );
+    }
     if (!sortField) return students;
     return [...students].sort((a, b) => {
       const aVal = a[sortField] ?? '';
@@ -1772,7 +1853,7 @@ export default function ClassDetailPage() {
       const cmp = aVal.localeCompare(bVal, undefined, { numeric: true });
       return sortDir === 'asc' ? cmp : -cmp;
     });
-  }, [cls?.students, sortField, sortDir]);
+  }, [cls?.students, sortField, sortDir, studentSearch]);
 
   useEffect(() => {
     if (!id) return;
@@ -1968,169 +2049,224 @@ export default function ClassDetailPage() {
         </div>
       )}
 
-      {/* Students section */}
+      {/* Tab navigation */}
       <div className="bg-white rounded-lg border border-gray-200 shadow-sm">
-        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
-          <h2 className="text-sm font-semibold text-gray-700 uppercase tracking-wide">
-            Students
-          </h2>
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => { setShowBulkAdd(true); setShowAddRow(false); }}
-              className="px-3 py-1.5 rounded-md border border-gray-300 text-xs font-medium text-gray-700 hover:bg-gray-50 transition"
-            >
-              Bulk Add
-            </button>
-            <button
-              onClick={() => { setShowAddRow(true); setShowBulkAdd(false); }}
-              className="px-3 py-1.5 rounded-md bg-indigo-600 text-xs font-semibold text-white hover:bg-indigo-700 transition"
-            >
-              + Add Student
-            </button>
-          </div>
+        <div className="border-b border-gray-200">
+          <nav className="flex gap-0" aria-label="Tabs">
+            {([
+              { key: 'sessions' as TabKey, label: 'Report Sessions' },
+              { key: 'students' as TabKey, label: 'Students' },
+              { key: 'tests' as TabKey, label: 'Tests' },
+            ]).map((tab) => (
+              <button
+                key={tab.key}
+                onClick={() => setActiveTab(tab.key)}
+                className={`px-6 py-3.5 text-sm font-medium border-b-2 transition whitespace-nowrap ${
+                  activeTab === tab.key
+                    ? 'border-indigo-600 text-indigo-600'
+                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                }`}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </nav>
         </div>
 
-        {cls.students.length === 0 && !showAddRow ? (
-          <div className="px-6 py-10 text-center">
-            <p className="text-sm text-gray-400 mb-3">No students yet.</p>
-            <button
-              onClick={() => setShowAddRow(true)}
-              className="text-sm text-indigo-600 hover:text-indigo-700 font-medium transition"
-            >
-              Add your first student
-            </button>
-          </div>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-gray-100 text-left">
-                  {(['first_name', 'last_name', 'student_ref_id'] as const).map((field, i) => {
-                    const labels: Record<string, string> = { first_name: 'First Name', last_name: 'Last Name', student_ref_id: 'Ref ID' };
-                    const active = sortField === field;
-                    const icon = active ? (sortDir === 'asc' ? ' ↑' : ' ↓') : ' ↕';
-                    return (
-                      <th
-                        key={field}
-                        onClick={() => handleSortHeader(field)}
-                        className={`px-4 py-3 text-xs font-semibold uppercase tracking-wide cursor-pointer select-none transition ${active ? 'text-indigo-600' : 'text-gray-500 hover:text-gray-700'}`}
-                        style={i === 0 ? {} : undefined}
-                      >
-                        {labels[field]}
-                        <span className={active ? 'text-indigo-500' : 'text-gray-300'}>{icon}</span>
-                      </th>
-                    );
-                  })}
-                  <th className="px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Gender</th>
-                  <th className="px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Actions</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-50">
-                {sortedStudents.map((student) =>
-                  editingStudentId === student.id ? (
-                    <EditStudentRow
-                      key={student.id}
-                      student={student}
-                      onSaved={handleStudentSaved}
-                      onCancel={() => setEditingStudentId(null)}
-                    />
-                  ) : (
-                    <tr key={student.id} className="hover:bg-gray-50 transition group">
-                      <td className="px-4 py-3 font-medium text-gray-900">{student.first_name}</td>
-                      <td className="px-4 py-3 text-gray-600">{student.last_name ?? <span className="text-gray-300">—</span>}</td>
-                      <td className="px-4 py-3 text-gray-500 font-mono text-xs">{student.student_ref_id ?? <span className="text-gray-300">—</span>}</td>
-                      <td className="px-4 py-3 text-gray-500 capitalize">{student.gender ?? <span className="text-gray-300">—</span>}</td>
-                      <td className="px-4 py-3">
-                        <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition">
-                          <button
-                            onClick={() => setEditingStudentId(student.id)}
-                            className="text-xs text-indigo-600 hover:text-indigo-800 font-medium transition"
+        {/* Tab panels */}
+        {activeTab === 'students' && (
+          <div className="p-0">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+              <h2 className="text-sm font-semibold text-gray-700 uppercase tracking-wide">
+                Students
+              </h2>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => { setShowBulkAdd(true); setShowAddRow(false); }}
+                  className="px-3 py-1.5 rounded-md border border-gray-300 text-xs font-medium text-gray-700 hover:bg-gray-50 transition"
+                >
+                  Bulk Add
+                </button>
+                <button
+                  onClick={() => { setShowAddRow(true); setShowBulkAdd(false); }}
+                  className="px-3 py-1.5 rounded-md bg-indigo-600 text-xs font-semibold text-white hover:bg-indigo-700 transition"
+                >
+                  + Add Student
+                </button>
+              </div>
+            </div>
+
+            {/* Search bar */}
+            <div className="px-6 py-3 border-b border-gray-100">
+              <div className="relative max-w-xs">
+                <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <circle cx="11" cy="11" r="8" />
+                  <path strokeLinecap="round" d="m21 21-4.35-4.35" />
+                </svg>
+                <input
+                  type="text"
+                  value={studentSearch}
+                  onChange={(e) => setStudentSearch(e.target.value)}
+                  placeholder="Search students…"
+                  className="w-full pl-9 pr-3 py-1.5 rounded-md border border-gray-300 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 outline-none transition"
+                />
+              </div>
+            </div>
+
+            {cls.students.length === 0 && !showAddRow ? (
+              <div className="px-6 py-10 text-center">
+                <p className="text-sm text-gray-400 mb-3">No students yet.</p>
+                <button
+                  onClick={() => setShowAddRow(true)}
+                  className="text-sm text-indigo-600 hover:text-indigo-700 font-medium transition"
+                >
+                  Add your first student
+                </button>
+              </div>
+            ) : (
+              <div className="max-h-[600px] overflow-y-auto overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead className="sticky top-0 z-10 bg-white">
+                    <tr className="border-b border-gray-100 text-left shadow-sm">
+                      {(['first_name', 'last_name', 'student_ref_id'] as const).map((field, i) => {
+                        const labels: Record<string, string> = { first_name: 'First Name', last_name: 'Last Name', student_ref_id: 'Ref ID' };
+                        const active = sortField === field;
+                        const icon = active ? (sortDir === 'asc' ? ' ↑' : ' ↓') : ' ↕';
+                        return (
+                          <th
+                            key={field}
+                            onClick={() => handleSortHeader(field)}
+                            className={`px-4 py-3 text-xs font-semibold uppercase tracking-wide cursor-pointer select-none transition ${active ? 'text-indigo-600' : 'text-gray-500 hover:text-gray-700'}`}
+                            style={i === 0 ? {} : undefined}
                           >
-                            Edit
-                          </button>
-                          <button
-                            onClick={() => setDeletingStudentId(student.id)}
-                            className="text-xs text-red-500 hover:text-red-700 font-medium transition"
-                          >
-                            Remove
-                          </button>
-                        </div>
-                      </td>
+                            {labels[field]}
+                            <span className={active ? 'text-indigo-500' : 'text-gray-300'}>{icon}</span>
+                          </th>
+                        );
+                      })}
+                      <th className="px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Gender</th>
+                      <th className="px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wide">Actions</th>
                     </tr>
-                  )
-                )}
-                {showAddRow && (
-                  <AddStudentRow
-                    classId={id}
-                    onAdded={handleStudentAdded}
-                    onCancel={() => setShowAddRow(false)}
-                  />
-                )}
-              </tbody>
-            </table>
+                  </thead>
+                  <tbody className="divide-y divide-gray-50">
+                    {sortedStudents.map((student) =>
+                      editingStudentId === student.id ? (
+                        <EditStudentRow
+                          key={student.id}
+                          student={student}
+                          onSaved={handleStudentSaved}
+                          onCancel={() => setEditingStudentId(null)}
+                        />
+                      ) : (
+                        <tr key={student.id} className="hover:bg-gray-50 transition group">
+                          <td className="px-4 py-3 font-medium text-gray-900">{student.first_name}</td>
+                          <td className="px-4 py-3 text-gray-600">{student.last_name ?? <span className="text-gray-300">—</span>}</td>
+                          <td className="px-4 py-3 text-gray-500 font-mono text-xs">{student.student_ref_id ?? <span className="text-gray-300">—</span>}</td>
+                          <td className="px-4 py-3 text-gray-500 capitalize">{student.gender ?? <span className="text-gray-300">—</span>}</td>
+                          <td className="px-4 py-3">
+                            <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition">
+                              <button
+                                onClick={() => setEditingStudentId(student.id)}
+                                className="text-xs text-indigo-600 hover:text-indigo-800 font-medium transition"
+                              >
+                                Edit
+                              </button>
+                              <button
+                                onClick={() => setDeletingStudentId(student.id)}
+                                className="text-xs text-red-500 hover:text-red-700 font-medium transition"
+                              >
+                                Remove
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      )
+                    )}
+                    {showAddRow && (
+                      <AddStudentRow
+                        classId={id}
+                        onAdded={handleStudentAdded}
+                        onCancel={() => setShowAddRow(false)}
+                      />
+                    )}
+                    {sortedStudents.length === 0 && studentSearch.trim() && (
+                      <tr>
+                        <td colSpan={5} className="px-4 py-8 text-center text-sm text-gray-400">
+                          No students match &ldquo;{studentSearch}&rdquo;
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            )}
           </div>
         )}
-      </div>
 
-      {/* Tests section */}
-      <TestsCard classId={id} />
-
-      {/* Report Sessions section */}
-      <div className="bg-white rounded-lg border border-gray-200 shadow-sm">
-        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
-          <h2 className="text-sm font-semibold text-gray-700 uppercase tracking-wide">
-            Report Sessions
-          </h2>
-          <button
-            onClick={() => setShowCreateSession(true)}
-            className="px-3 py-1.5 rounded-md bg-indigo-600 text-xs font-semibold text-white hover:bg-indigo-700 transition"
-          >
-            + New Session
-          </button>
-        </div>
-
-        {cls.sessions.length === 0 ? (
-          <div className="px-6 py-10 text-center">
-            <p className="text-sm text-gray-400 mb-3">No report sessions yet.</p>
-            <button
-              onClick={() => setShowCreateSession(true)}
-              className="text-sm text-indigo-600 hover:text-indigo-700 font-medium transition"
-            >
-              Create your first session
-            </button>
+        {activeTab === 'tests' && (
+          <div className="p-0">
+            <TestsCard classId={id} />
           </div>
-        ) : (
-          <div className="divide-y divide-gray-50">
-            {cls.sessions.map((session) => (
-              <Link
-                key={session.id}
-                href={`/classes/${id}/sessions/${session.id}`}
-                className="flex items-start justify-between px-6 py-4 hover:bg-gray-50 transition group"
+        )}
+
+        {activeTab === 'sessions' && (
+          <div className="p-0">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+              <h2 className="text-sm font-semibold text-gray-700 uppercase tracking-wide">
+                Report Sessions
+              </h2>
+              <button
+                onClick={() => setShowCreateSession(true)}
+                className="px-3 py-1.5 rounded-md bg-indigo-600 text-xs font-semibold text-white hover:bg-indigo-700 transition"
               >
-                <div className="min-w-0">
-                  <div className="flex items-center gap-2 mb-1">
-                    <span className="font-medium text-gray-900 group-hover:text-indigo-700 transition truncate">
-                      {session.name}
-                    </span>
-                    <StatusBadge status={session.status} />
-                  </div>
-                  {session.topics_covered.length > 0 && (
-                    <p className="text-xs text-gray-400 truncate">
-                      {session.topics_covered.slice(0, 4).join(", ")}
-                      {session.topics_covered.length > 4 && ` +${session.topics_covered.length - 4} more`}
-                    </p>
-                  )}
-                  <div className="flex items-center gap-3 mt-1 text-xs text-gray-400">
-                    <span>{session._count.disciplines} discipline{session._count.disciplines !== 1 ? "s" : ""}</span>
-                    <span>{session._count.reports} report{session._count.reports !== 1 ? "s" : ""}</span>
-                    <span>{new Date(session.created_at).toLocaleDateString()}</span>
-                  </div>
-                </div>
-                <svg className="w-4 h-4 text-gray-300 group-hover:text-indigo-400 mt-1 shrink-0 transition" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
-                </svg>
-              </Link>
-            ))}
+                + New Session
+              </button>
+            </div>
+
+            {cls.sessions.length === 0 ? (
+              <div className="px-6 py-10 text-center">
+                <p className="text-sm text-gray-400 mb-3">No report sessions yet.</p>
+                <button
+                  onClick={() => setShowCreateSession(true)}
+                  className="text-sm text-indigo-600 hover:text-indigo-700 font-medium transition"
+                >
+                  Create your first session
+                </button>
+              </div>
+            ) : (
+              <div className="divide-y divide-gray-50">
+                {cls.sessions.map((session) => (
+                  <Link
+                    key={session.id}
+                    href={`/classes/${id}/sessions/${session.id}`}
+                    className="flex items-start justify-between px-6 py-4 hover:bg-gray-50 transition group"
+                  >
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className="font-medium text-gray-900 group-hover:text-indigo-700 transition truncate">
+                          {session.name}
+                        </span>
+                        <StatusBadge status={session.status} />
+                      </div>
+                      {session.topics_covered.length > 0 && (
+                        <p className="text-xs text-gray-400 truncate">
+                          {session.topics_covered.slice(0, 4).join(", ")}
+                          {session.topics_covered.length > 4 && ` +${session.topics_covered.length - 4} more`}
+                        </p>
+                      )}
+                      <div className="flex items-center gap-3 mt-1 text-xs text-gray-400">
+                        <span>{session._count.disciplines} discipline{session._count.disciplines !== 1 ? "s" : ""}</span>
+                        <span>{session._count.reports} report{session._count.reports !== 1 ? "s" : ""}</span>
+                        <span>{new Date(session.created_at).toLocaleDateString()}</span>
+                      </div>
+                    </div>
+                    <svg className="w-4 h-4 text-gray-300 group-hover:text-indigo-400 mt-1 shrink-0 transition" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+                    </svg>
+                  </Link>
+                ))}
+              </div>
+            )}
           </div>
         )}
       </div>

@@ -1121,6 +1121,7 @@ export default function RatingsGrid({
             disciplines={disciplines}
             getScore={getScore}
             onScoreChange={handleScoreChange}
+            onScoreCommit={saveSingleRating}
             getComment={getComment}
             onCommentChange={handleCommentChange}
             onCommentBlur={handleCommentBlur}

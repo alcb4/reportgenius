@@ -63,6 +63,8 @@ interface SparklineGridProps {
   getScore: (studentId: string, disciplineId: string) => number | null;
   /** Called when the user commits a score change. */
   onScoreChange: (studentId: string, disciplineId: string, score: number) => void;
+  /** Called immediately after a score is committed — parent should persist to DB. */
+  onScoreCommit?: (studentId: string, disciplineId: string, score: number) => void;
   /** Reads the current comment for a student. */
   getComment: (studentId: string) => string;
   /** Called when comment text changes. */
@@ -582,6 +584,7 @@ export default function SparklineGrid({
   disciplines,
   getScore,
   onScoreChange,
+  onScoreCommit,
   getComment,
   onCommentChange,
   onCommentBlur,
@@ -627,9 +630,10 @@ export default function SparklineGrid({
           1
         );
         onScoreChange(state.studentId, discId, winner);
+        if (onScoreCommit) onScoreCommit(state.studentId, discId, winner);
       }
     },
-    [onScoreChange]
+    [onScoreChange, onScoreCommit]
   );
 
   // ── Global mouse handlers (attached once, cleaned up on unmount) ────────────
@@ -778,6 +782,7 @@ export default function SparklineGrid({
       const disc = disciplines[overallIdx];
       if (!disc) return;
       onScoreChange(studentId, disc.id, score);
+      if (onScoreCommit) onScoreCommit(studentId, disc.id, score);
     } else {
       // Topic column
       const topicIdx = overallIdx - disciplines.length;
