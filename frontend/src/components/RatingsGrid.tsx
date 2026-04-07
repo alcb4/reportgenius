@@ -447,7 +447,7 @@ function useRatingsGridState(
 interface RatingsGridSave {
   saveError: string | null;
   setSaveError: React.Dispatch<React.SetStateAction<string | null>>;
-  saveSingleRating: (studentId: string, disciplineId: string) => Promise<void>;
+  saveSingleRating: (studentId: string, disciplineId: string, scoreOverride?: number) => Promise<void>;
   saveAllPending: () => Promise<void>;
 }
 
@@ -464,10 +464,10 @@ function useRatingsGridSave(
   const [saveError, setSaveError] = useState<string | null>(null);
 
   const saveSingleRating = useCallback(
-    async (studentId: string, disciplineId: string) => {
+    async (studentId: string, disciplineId: string, scoreOverride?: number) => {
       const key = cellKey(studentId, disciplineId);
-      const cell = grid.get(key);
-      if (!cell || cell.score === null) return;
+      const score = scoreOverride ?? grid.get(key)?.score ?? null;
+      if (score === null) return;
 
       try {
         await apiFetch(`/api/v1/sessions/${sessionId}/ratings`, {
@@ -477,7 +477,7 @@ function useRatingsGridSave(
               {
                 studentId,
                 sessionDisciplineId: disciplineId,
-                score: cell.score,
+                score,
                 comment: comments.get(studentId)?.trim() || undefined,
               },
             ],
