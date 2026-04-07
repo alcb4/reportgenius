@@ -32,6 +32,7 @@
 import {
   useState,
   useEffect,
+  useMemo,
   useRef,
   useCallback,
   KeyboardEvent,
@@ -412,6 +413,7 @@ function useRatingsGridState(
   const hasUnsaved = pendingSave.size > 0 || pendingComments.size > 0;
 
   const pendingCommentsRef = useRef(pendingComments);
+  // eslint-disable-next-line react-hooks/refs
   pendingCommentsRef.current = pendingComments;
 
   useEffect(() => {
@@ -614,6 +616,7 @@ function useRatingsGridTopics(sessionId: string): RatingsGridTopics {
 
 interface RatingsGridDrag {
   dragPreview: DragPreview | null;
+  dragRef: React.MutableRefObject<DragState | null>;
   tableContainerRef: React.RefObject<HTMLDivElement | null>;
   cellRefs: React.MutableRefObject<Map<string, HTMLDivElement>>;
   handleDiscMouseDown: (
@@ -816,6 +819,7 @@ function useRatingsGridDrag(
 
   return {
     dragPreview,
+    dragRef,
     tableContainerRef,
     cellRefs,
     handleDiscMouseDown,
@@ -836,6 +840,7 @@ interface RatingsGridGeneration {
   handleBulkGenerate: () => Promise<void>;
   setBulkDone: React.Dispatch<React.SetStateAction<boolean>>;
   setBulkBatchId: React.Dispatch<React.SetStateAction<string | null>>;
+  setBulkError: React.Dispatch<React.SetStateAction<string | null>>;
 }
 
 function useRatingsGridGeneration(
@@ -908,6 +913,7 @@ function useRatingsGridGeneration(
     handleBulkGenerate,
     setBulkDone,
     setBulkBatchId,
+    setBulkError,
   };
 }
 
@@ -925,7 +931,7 @@ export default function RatingsGrid({
 }: RatingsGridProps) {
   // 1. Normalize inputs
   const normalizedStudents = students ?? [];
-  const normalizedDisciplines = disciplines ?? [];
+  const normalizedDisciplines = useMemo(() => disciplines ?? [], [disciplines]);
 
   // 2. ALL hooks in one contiguous top-level block
 
@@ -938,7 +944,6 @@ export default function RatingsGrid({
     pendingComments,
     setPendingComments,
     hasUnsaved,
-    pendingCommentsRef,
   } = useRatingsGridState(sessionId, normalizedStudents, normalizedDisciplines);
 
   // Save logic (single, bulk, auto-save interval)
@@ -984,6 +989,7 @@ export default function RatingsGrid({
 
   const {
     dragPreview,
+    dragRef,
     tableContainerRef,
     cellRefs,
     handleDiscMouseDown,
@@ -1002,11 +1008,11 @@ export default function RatingsGrid({
     handleGenerateSingle,
     bulkBatchId,
     bulkError,
-    bulkDone,
     isBulkRunning,
     handleBulkGenerate,
     setBulkDone,
     setBulkBatchId,
+    setBulkError,
   } = useRatingsGridGeneration(
     sessionId,
     saveAllPending,
@@ -1296,6 +1302,7 @@ export default function RatingsGrid({
         style={{ display: viewMode === "table" ? undefined : "none" }}
       >
         {/* Drag-to-grade SVG overlay */}
+        {/* eslint-disable-next-line react-hooks/refs */}
         {dragPreview && dragPreview.scores.size >= 1 && (() => {
           const container = tableContainerRef.current;
           if (!container) return null;

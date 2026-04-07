@@ -193,18 +193,11 @@ export default function CompactFilterBar({
   const [testsExpandedRaw, setTestsExpandedRaw] = useState(false);
   const [showSelectTests, setShowSelectTests] = useState(false);
 
-  // Guard: if session is null/undefined, render a minimal loading state (AFTER hooks)
-  if (!session) {
-    return (
-      <div className="bg-white rounded-lg border border-gray-200 p-4 animate-pulse">
-        <div className="h-4 bg-gray-200 rounded w-24 mb-2" />
-        <div className="h-6 bg-gray-200 rounded w-32" />
-      </div>
-    );
-  }
-
   // Local filter state — synced from session on mount
   const [filterState, setFilterState] = useState<FilterBarState>(() => {
+    if (!session) {
+      return { tone: "balanced", testFilters: {}, enableProgression: true, allowNegativeProgression: true, progressionDisciplines: [], classOverview: "" };
+    }
     const savedFilters = session.test_filters ?? {};
     const testFilters: Record<string, LocalTestFilterState> = {};
     for (const test of classTests) {
@@ -243,14 +236,17 @@ export default function CompactFilterBar({
 
   // Sync tone from session when it changes externally
   useEffect(() => {
+    if (!session) return;
     setFilterState((prev) => ({
       ...prev,
       tone: (session.tone as "gentle" | "balanced" | "direct") ?? "balanced",
     }));
-  }, [session.tone]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session?.tone]);
 
   // Sync classTests into testFilters when tests load
   useEffect(() => {
+    if (!session) return;
     setFilterState((prev) => {
       const saved = session.test_filters ?? {};
       const merged = { ...prev.testFilters };
@@ -273,6 +269,16 @@ export default function CompactFilterBar({
 
   // Class overview debounce ref
   const overviewTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Guard: if session is null/undefined, render a minimal loading state (all hooks are above)
+  if (!session) {
+    return (
+      <div className="bg-white rounded-lg border border-gray-200 p-4 animate-pulse">
+        <div className="h-4 bg-gray-200 rounded w-24 mb-2" />
+        <div className="h-6 bg-gray-200 rounded w-32" />
+      </div>
+    );
+  }
 
   // ── Tone ──
   function handleToneChange(t: "gentle" | "balanced" | "direct") {

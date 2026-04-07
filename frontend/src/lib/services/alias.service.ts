@@ -46,7 +46,7 @@ function formatAlias(index: number): string {
 export async function getOrCreateAliases(
   sessionId: string,
   classId: string,
-  studentIds: string[]
+  _studentIds: string[]
 ): Promise<AliasMap> {
   const existing = await prisma.sessionStudentAlias.findMany({
     where: { session_id: sessionId },
@@ -216,13 +216,12 @@ export function applyAliasesToBatchPayloads(
 export function validateAndRemapResponse(
   raw: string,
   aliasMap: AliasMap,
-  expectedStudentIds: string[]
+  _expectedStudentIds: string[]
 ): ParseValidationResult {
   const errors: Array<{ alias?: string; studentId?: string; error: string }> = []
   const reports: RemappedReport[] = []
   const reviewReasons: string[] = []
   let flaggedForReview = false
-  let rawOutput: string | undefined
 
   let cleaned = raw.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim()
   const firstBracket = cleaned.indexOf('[')

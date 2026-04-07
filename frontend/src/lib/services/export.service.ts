@@ -61,6 +61,7 @@ async function launchBrowser(): Promise<unknown> {
 // ── HTML → PDF ───────────────────────────────────────────────────────────────
 
 async function htmlToBuffer(html: string): Promise<Buffer> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let browser: any = null
 
   try {
