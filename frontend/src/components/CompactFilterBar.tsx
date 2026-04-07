@@ -189,7 +189,11 @@ export default function CompactFilterBar({
   onAddDiscipline?: () => void;
   isReadOnly?: boolean;
 }) {
-  // Guard: if session is null/undefined, render a minimal loading state
+  const [open, setOpen] = useState(false);
+  const [testsExpandedRaw, setTestsExpandedRaw] = useState(false);
+  const [showSelectTests, setShowSelectTests] = useState(false);
+
+  // Guard: if session is null/undefined, render a minimal loading state (AFTER hooks)
   if (!session) {
     return (
       <div className="bg-white rounded-lg border border-gray-200 p-4 animate-pulse">
@@ -198,10 +202,6 @@ export default function CompactFilterBar({
       </div>
     );
   }
-
-  const [open, setOpen] = useState(false);
-  const [testsExpandedRaw, setTestsExpandedRaw] = useState(false);
-  const [showSelectTests, setShowSelectTests] = useState(false);
 
   // Local filter state — synced from session on mount
   const [filterState, setFilterState] = useState<FilterBarState>(() => {

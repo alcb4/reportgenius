@@ -128,7 +128,7 @@ export async function POST(
         orderBy: { created_at: 'asc' },
       })
 
-      return { ...created, disciplines }
+      return { ...created, disciplines, _count: { disciplines: disciplines.length, reports: 0 } }
     })
 
     return NextResponse.json({ data: session }, { status: 201 })

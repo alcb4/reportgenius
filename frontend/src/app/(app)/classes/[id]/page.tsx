@@ -2265,8 +2265,8 @@ export default function ClassDetailPage() {
                         </p>
                       )}
                       <div className="flex items-center gap-3 mt-1 text-xs text-gray-400">
-                        <span>{session._count.disciplines} discipline{session._count.disciplines !== 1 ? "s" : ""}</span>
-                        <span>{session._count.reports} report{session._count.reports !== 1 ? "s" : ""}</span>
+                        <span>{session._count?.disciplines ?? 0} discipline{session._count?.disciplines !== 1 ? "s" : ""}</span>
+                        <span>{session._count?.reports ?? 0} report{session._count?.reports !== 1 ? "s" : ""}</span>
                         <span>{new Date(session.created_at).toLocaleDateString()}</span>
                       </div>
                     </div>

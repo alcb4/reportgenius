@@ -43,24 +43,18 @@ import SparklineGrid from "@/components/SparklineGrid";
 
 // ── Drag-to-grade types ───────────────────────────────────────────────────────
 
-/** Internal drag tracking stored in a ref (no re-renders during pointer move). */
 interface DragState {
   studentId: string;
-  /** Left/right bounds + centerX of each discipline column, measured once on mousedown. */
   colBounds: Array<{ discId: string; left: number; right: number; centerX: number; centerY: number }>;
-  /** Band samples (1–5) collected per discipline during the drag. */
   samples: Map<string, number[]>;
-  /** True once the pointer has moved ≥8px horizontally — prevents accidental commits. */
   active: boolean;
   startX: number;
   rowTop: number;
   rowHeight: number;
 }
 
-/** Drives the visual SVG overlay — updated on every pointermove. */
 interface DragPreview {
   studentId: string;
-  /** disciplineId → preview score (1–5). Only includes columns the pointer has visited. */
   scores: Map<string, number>;
 }
 
@@ -106,7 +100,6 @@ interface RatingsGridProps {
   topics: string[];
 }
 
-// Cell state key: "studentId|disciplineId"
 type CellKey = string;
 
 interface CellValue {
@@ -133,8 +126,6 @@ function rowColour(avg: number | null): string {
   return "bg-red-50/40";
 }
 
-
-/** Sparkles icon (heroicons outline) used for the generate action. */
 function SparklesIcon({ className }: { className?: string }) {
   return (
     <svg className={className} fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
@@ -143,7 +134,6 @@ function SparklesIcon({ className }: { className?: string }) {
   );
 }
 
-/** Report status icon — colour signals state, no separate dot. */
 function ReportStatusCell({
   report,
   studentId,
@@ -254,10 +244,9 @@ function BulkProgressToast({
   const [error, setError] = useState<string | null>(null);
 
   const cancelledRef = useRef(false);
-
-  // Keep callbacks in refs (updated via effect, not during render)
   const onDoneRef = useRef(onDone);
   const onReportCreatedRef = useRef(onReportCreated);
+
   useEffect(() => { onDoneRef.current = onDone; }, [onDone]);
   useEffect(() => { onReportCreatedRef.current = onReportCreated; }, [onReportCreated]);
 
@@ -353,40 +342,30 @@ function BulkProgressToast({
   );
 }
 
-// ── Main RatingsGrid ───────────────────────────────────────────────────────────
+// ── Custom Hook: useRatingsGridState ──────────────────────────────────────────
 
-export default function RatingsGrid({
-  sessionId,
-  students,
-  disciplines,
-  reports,
-  isReadOnly,
-  onReportCreated,
-  onBulkBatchStarted,
-  topics,
-}: RatingsGridProps) {
-  // Guard: render loading skeleton if no data yet
-  if (!students?.length && !disciplines?.length) {
-    return (
-      <div className="bg-white rounded-lg border border-gray-200 p-6 animate-pulse">
-        <div className="h-4 bg-gray-200 rounded w-24 mb-4" />
-        <div className="space-y-2">
-          <div className="h-8 bg-gray-100 rounded" />
-          <div className="h-8 bg-gray-100 rounded" />
-          <div className="h-8 bg-gray-100 rounded" />
-        </div>
-      </div>
-    );
-  }
+interface RatingsGridState {
+  grid: Map<CellKey, CellValue>;
+  setGrid: React.Dispatch<React.SetStateAction<Map<CellKey, CellValue>>>;
+  comments: Map<string, string>;
+  setComments: React.Dispatch<React.SetStateAction<Map<string, string>>>;
+  pendingSave: Set<CellKey>;
+  setPendingSave: React.Dispatch<React.SetStateAction<Set<CellKey>>>;
+  pendingComments: Set<string>;
+  setPendingComments: React.Dispatch<React.SetStateAction<Set<string>>>;
+  hasUnsaved: boolean;
+  pendingCommentsRef: React.MutableRefObject<Set<string>>;
+}
 
-  // ── Grid state ─────────────────────────────────────────────────────────────
-
-  // Build initial grid from incoming student ratings
+function useRatingsGridState(
+  sessionId: string,
+  students: GridStudent[],
+  disciplines: GridDiscipline[]
+): RatingsGridState {
   const localKey = `rg_grid_${sessionId}`;
 
-  const buildInitialGrid = useCallback(() => {
+  const buildInitialGrid = useCallback((): Map<CellKey, CellValue> => {
     const grid = new Map<CellKey, CellValue>();
-    // Try to rehydrate from localStorage first (survives page reload)
     let stored: Record<string, CellValue> = {};
     try {
       const raw = typeof window !== "undefined" ? localStorage.getItem(localKey) : null;
@@ -399,7 +378,6 @@ export default function RatingsGrid({
           (r) => r.session_discipline_id === disc.id
         );
         const key = cellKey(student.id, disc.id);
-        // Prefer server value if it has a score, otherwise use cached draft
         const serverScore = existing?.score ?? null;
         const cached = stored[key];
         grid.set(key, {
@@ -421,7 +399,6 @@ export default function RatingsGrid({
     return m;
   });
 
-  // Persist grid to localStorage whenever it changes
   useEffect(() => {
     try {
       const obj: Record<string, CellValue> = {};
@@ -430,28 +407,17 @@ export default function RatingsGrid({
     } catch { /* quota exceeded — ignore */ }
   }, [grid, localKey]);
 
-  // Tracks which cells have unsaved changes
   const [pendingSave, setPendingSave] = useState<Set<CellKey>>(new Set());
   const [pendingComments, setPendingComments] = useState<Set<string>>(new Set());
-
   const hasUnsaved = pendingSave.size > 0 || pendingComments.size > 0;
 
-  // Mirror pendingComments in a ref so the students-sync effect below can read
-  // the current value without listing it as a dependency (which would cause the
-  // effect to re-fire on every keystroke and overwrite in-progress edits).
   const pendingCommentsRef = useRef(pendingComments);
   pendingCommentsRef.current = pendingComments;
 
-  // Sync grid when students/disciplines change (e.g. after discipline added)
   useEffect(() => {
     setGrid(buildInitialGrid());
   }, [buildInitialGrid]);
 
-  // Sync comments Map when students data loads or changes.
-  // The lazy useState initializer only runs on mount (when students=[] from the
-  // async parent fetch), so this effect is the only path that hydrates real
-  // server comments into the textarea. Students whose comments are actively
-  // being edited (present in pendingComments) are skipped to avoid clobbering.
   useEffect(() => {
     setComments((prev) => {
       const next = new Map(prev);
@@ -466,59 +432,42 @@ export default function RatingsGrid({
     });
   }, [students]);
 
-  // ── Topic ratings state ────────────────────────────────────────────────────
+  return {
+    grid, setGrid,
+    comments, setComments,
+    pendingSave, setPendingSave,
+    pendingComments, setPendingComments,
+    hasUnsaved,
+    pendingCommentsRef,
+  };
+}
 
-  // Keyed by `${studentId}|${topicName}` → score
-  const [topicGrid, setTopicGrid] = useState<Map<string, number | null>>(() => new Map());
-  const [topicSaveError, setTopicSaveError] = useState<string | null>(null);
+// ── Custom Hook: useRatingsGridSave ───────────────────────────────────────────
 
-  // Load topic ratings on mount
-  useEffect(() => {
-    if (!sessionId) return;
-    let cancelled = false;
+interface RatingsGridSave {
+  saveError: string | null;
+  setSaveError: React.Dispatch<React.SetStateAction<string | null>>;
+  saveSingleRating: (studentId: string, disciplineId: string) => Promise<void>;
+  saveAllPending: () => Promise<void>;
+}
 
-    async function loadTopicRatings() {
-      try {
-        interface TopicRatingEntry {
-          studentId: string;
-          topicName: string;
-          score: number;
-        }
-        interface TopicRatingsResponse {
-          ratings: TopicRatingEntry[];
-        }
-        const result = await apiFetch<TopicRatingsResponse>(
-          `/api/v1/sessions/${sessionId}/topic-ratings`
-        );
-        if (cancelled) return;
-        const m = new Map<string, number | null>();
-        for (const r of result.ratings) {
-          m.set(`${r.studentId}|${r.topicName}`, r.score);
-        }
-        setTopicGrid(m);
-      } catch (err) {
-        // Non-fatal — topics are optional
-        console.error("[RatingsGrid] Failed to load topic ratings:", err);
-      }
-    }
-
-    loadTopicRatings();
-    return () => { cancelled = true; };
-  }, [sessionId]);
-
-  // ── Save logic ─────────────────────────────────────────────────────────────
-
+function useRatingsGridSave(
+  sessionId: string,
+  grid: Map<CellKey, CellValue>,
+  comments: Map<string, string>,
+  pendingSave: Set<CellKey>,
+  pendingComments: Set<string>,
+  setPendingSave: React.Dispatch<React.SetStateAction<Set<CellKey>>>,
+  setPendingComments: React.Dispatch<React.SetStateAction<Set<string>>>,
+  disciplines: GridDiscipline[]
+): RatingsGridSave {
   const [saveError, setSaveError] = useState<string | null>(null);
 
-  /**
-   * Save a single cell (student × discipline) to the API.
-   * Uses POST /sessions/:id/ratings with a single rating entry.
-   */
   const saveSingleRating = useCallback(
     async (studentId: string, disciplineId: string) => {
       const key = cellKey(studentId, disciplineId);
       const cell = grid.get(key);
-      if (!cell || cell.score === null) return; // Nothing to save if no score
+      if (!cell || cell.score === null) return;
 
       try {
         await apiFetch(`/api/v1/sessions/${sessionId}/ratings`, {
@@ -548,12 +497,9 @@ export default function RatingsGrid({
         setSaveError(err instanceof APIError ? err.message : "Auto-save failed.");
       }
     },
-    [sessionId, grid, comments]
+    [sessionId, grid, comments, setPendingSave, setPendingComments]
   );
 
-  /**
-   * Flush all pending discipline changes to the API in one bulk call.
-   */
   const saveAllPending = useCallback(async () => {
     if (pendingSave.size === 0 && pendingComments.size === 0) return;
 
@@ -576,9 +522,7 @@ export default function RatingsGrid({
       });
     }
 
-    // Also flush comment-only changes for students with at least one score
     for (const studentId of pendingComments) {
-      // Find all scored disciplines for this student and include them
       for (const disc of disciplines) {
         const key = cellKey(studentId, disc.id);
         const cell = grid.get(key);
@@ -606,124 +550,103 @@ export default function RatingsGrid({
     } catch (err) {
       setSaveError(err instanceof APIError ? err.message : "Save failed.");
     }
-  }, [sessionId, pendingSave, pendingComments, grid, comments, disciplines]);
+  }, [sessionId, pendingSave, pendingComments, grid, comments, disciplines, setPendingSave, setPendingComments]);
 
-  // 30-second auto-save interval for discipline ratings
   useEffect(() => {
     const timer = setInterval(saveAllPending, 30_000);
     return () => clearInterval(timer);
   }, [saveAllPending]);
 
+  return { saveError, setSaveError, saveSingleRating, saveAllPending };
+}
 
-  // ── Score change handler ────────────────────────────────────────────────────
+// ── Custom Hook: useRatingsGridTopics ─────────────────────────────────────────
 
-  function handleScoreChange(studentId: string, disciplineId: string, score: number) {
-    if (isReadOnly) return;
-    const key = cellKey(studentId, disciplineId);
-    setGrid((prev) => {
-      const next = new Map(prev);
-      next.set(key, { score, comment: prev.get(key)?.comment ?? null });
-      return next;
-    });
-    setPendingSave((prev) => {
-      const next = new Set(prev);
-      next.add(key);
-      return next;
-    });
-  }
+interface RatingsGridTopics {
+  topicGrid: Map<string, number | null>;
+  setTopicGrid: React.Dispatch<React.SetStateAction<Map<string, number | null>>>;
+  topicSaveError: string | null;
+  setTopicSaveError: React.Dispatch<React.SetStateAction<string | null>>;
+}
 
-  // ── Topic score change handler ─────────────────────────────────────────────
+function useRatingsGridTopics(sessionId: string): RatingsGridTopics {
+  const [topicGrid, setTopicGrid] = useState<Map<string, number | null>>(() => new Map());
+  const [topicSaveError, setTopicSaveError] = useState<string | null>(null);
 
-  async function handleTopicScoreChange(studentId: string, topicName: string, score: number) {
-    if (isReadOnly) return;
-    const key = `${studentId}|${topicName}`;
-    setTopicGrid((prev) => new Map(prev).set(key, score));
-    setTopicSaveError(null);
-    try {
-      await apiFetch(`/api/v1/sessions/${sessionId}/topic-ratings/bulk`, {
-        method: "POST",
-        body: { ratings: [{ studentId, topicName, score }] },
-      });
-    } catch (err) {
-      setTopicSaveError(err instanceof APIError ? err.message : "Failed to save topic rating.");
-    }
-  }
+  useEffect(() => {
+    if (!sessionId) return;
+    const controller = new AbortController();
 
-  // ── Comment change handler ─────────────────────────────────────────────────
-
-  function handleCommentChange(studentId: string, value: string) {
-    if (isReadOnly) return;
-    setComments((prev) => new Map(prev).set(studentId, value));
-    setPendingComments((prev) => new Set(prev).add(studentId));
-  }
-
-  // ── Blur handlers (cell auto-save) ─────────────────────────────────────────
-
-  function handleCellBlur(
-    e: FocusEvent<HTMLDivElement>,
-    studentId: string,
-    disciplineId: string
-  ) {
-    // Only save if focus left the entire score-group (not just moved between pip buttons)
-    const relatedTarget = e.relatedTarget as HTMLElement | null;
-    const currentTarget = e.currentTarget as HTMLElement;
-    if (relatedTarget && currentTarget.contains(relatedTarget)) return;
-
-    const key = cellKey(studentId, disciplineId);
-    if (pendingSave.has(key)) {
-      saveSingleRating(studentId, disciplineId);
-    }
-  }
-
-  function handleCommentBlur(studentId: string) {
-    if (!pendingComments.has(studentId)) return;
-    // Save comment alongside all scored disciplines for this student
-    const ratingsToPush: Array<{
-      studentId: string;
-      sessionDisciplineId: string;
-      score: number;
-      comment?: string;
-    }> = [];
-    for (const disc of disciplines) {
-      const key = cellKey(studentId, disc.id);
-      const cell = grid.get(key);
-      if (cell?.score !== null && cell !== undefined) {
-        ratingsToPush.push({
-          studentId,
-          sessionDisciplineId: disc.id,
-          score: cell.score as number,
-          comment: comments.get(studentId)?.trim() || undefined,
-        });
+    async function loadTopicRatings() {
+      try {
+        interface TopicRatingEntry {
+          studentId: string;
+          topicName: string;
+          score: number;
+        }
+        interface TopicRatingsResponse {
+          ratings: TopicRatingEntry[];
+        }
+        const result = await apiFetch<TopicRatingsResponse>(
+          `/api/v1/sessions/${sessionId}/topic-ratings`,
+          { signal: controller.signal }
+        );
+        if (controller.signal.aborted) return;
+        const m = new Map<string, number | null>();
+        for (const r of result.ratings) {
+          m.set(`${r.studentId}|${r.topicName}`, r.score);
+        }
+        setTopicGrid(m);
+      } catch (err) {
+        if (err instanceof DOMException && err.name === "AbortError") return;
+        console.error("[RatingsGrid] Failed to load topic ratings:", err);
       }
     }
-    if (ratingsToPush.length === 0) {
-      setPendingComments((prev) => {
-        const next = new Set(prev);
-        next.delete(studentId);
-        return next;
-      });
-      return;
-    }
-    apiFetch(`/api/v1/sessions/${sessionId}/ratings`, {
-      method: "POST",
-      body: { ratings: ratingsToPush },
-    })
-      .then(() => {
-        setPendingComments((prev) => {
-          const next = new Set(prev);
-          next.delete(studentId);
-          return next;
-        });
-      })
-      .catch((err: unknown) => {
-        setSaveError(err instanceof APIError ? err.message : "Auto-save failed.");
-      });
-  }
 
-  // ── Keyboard navigation ────────────────────────────────────────────────────
+    loadTopicRatings();
+    return () => { controller.abort(); };
+  }, [sessionId]);
 
-  // Cell refs indexed by "studentIdx-disciplineIdx"
+  return { topicGrid, setTopicGrid, topicSaveError, setTopicSaveError };
+}
+
+// ── Custom Hook: useRatingsGridDrag ───────────────────────────────────────────
+
+interface RatingsGridDrag {
+  dragPreview: DragPreview | null;
+  tableContainerRef: React.RefObject<HTMLDivElement | null>;
+  cellRefs: React.MutableRefObject<Map<string, HTMLDivElement>>;
+  handleDiscMouseDown: (
+    e: React.MouseEvent<HTMLTableCellElement>,
+    studentId: string,
+    rowEl: HTMLTableRowElement
+  ) => void;
+  handleCellKeyDown: (
+    e: KeyboardEvent<HTMLDivElement>,
+    si: number,
+    di: number,
+    studentId: string,
+    disciplineId: string,
+    currentScore: number | null
+  ) => void;
+  navKey: (si: number, di: number) => string;
+}
+
+function useRatingsGridDrag(
+  isReadOnly: boolean,
+  students: GridStudent[],
+  disciplines: GridDiscipline[],
+  handleScoreChange: (studentId: string, disciplineId: string, score: number) => void
+): RatingsGridDrag {
   const cellRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+  const dragRef = useRef<DragState | null>(null);
+  const [dragPreview, setDragPreview] = useState<DragPreview | null>(null);
+  const tableContainerRef = useRef<HTMLDivElement>(null);
+
+  function yToBand(clientY: number, rowTop: number, rowHeight: number): number {
+    const ratio = Math.max(0, Math.min(1, (clientY - rowTop) / rowHeight));
+    return Math.max(1, Math.min(5, Math.ceil((1 - ratio) * 5)));
+  }
 
   function navKey(si: number, di: number) {
     return `${si}-${di}`;
@@ -744,7 +667,6 @@ export default function RatingsGrid({
         if (nextDi >= 0 && nextDi < disciplines.length) {
           cellRefs.current.get(navKey(si, nextDi))?.focus();
         } else if (!e.shiftKey && nextDi >= disciplines.length) {
-          // Move to comment for this row
           const commentInput = document.getElementById(`comment-${students[si].id}`);
           commentInput?.focus();
         } else if (e.shiftKey && nextDi < 0 && si > 0) {
@@ -776,7 +698,6 @@ export default function RatingsGrid({
         break;
       }
       default:
-        // Number keys 1-5 set score directly
         if (e.key >= "1" && e.key <= "5") {
           e.preventDefault();
           handleScoreChange(studentId, disciplineId, parseInt(e.key, 10));
@@ -785,37 +706,17 @@ export default function RatingsGrid({
     }
   }
 
-  // ── Drag-to-grade ─────────────────────────────────────────────────────────
-
-  const dragRef = useRef<DragState | null>(null);
-  const [dragPreview, setDragPreview] = useState<DragPreview | null>(null);
-  const tableContainerRef = useRef<HTMLDivElement>(null);
-
-  /** Map Y offset within a row → score band 1–5 (top = 5, bottom = 1). */
-  function yToBand(clientY: number, rowTop: number, rowHeight: number): number {
-    const ratio = Math.max(0, Math.min(1, (clientY - rowTop) / rowHeight));
-    return Math.max(1, Math.min(5, Math.ceil((1 - ratio) * 5)));
-  }
-
-  /** Commit drag results: majority band per discipline, only if ≥2 columns traversed. */
   function commitDrag(state: DragState) {
     if (!state.active) return;
     const traversed = Array.from(state.samples.entries()).filter(([, s]) => s.length > 0);
-    if (traversed.length < 2) return; // accidental single-cell drag — ignore
+    if (traversed.length < 2) return;
 
     for (const [discId, samples] of traversed) {
-      // Majority vote across samples
       const tally = new Array<number>(6).fill(0);
       for (const b of samples) tally[b]++;
       const winner = tally.reduce((best, cnt, band) => cnt > tally[best] ? band : best, 1);
       handleScoreChange(state.studentId, discId, winner);
     }
-    // Trigger save for all changed cells
-    setPendingSave((prev) => {
-      const next = new Set(prev);
-      for (const [discId] of traversed) next.add(cellKey(state.studentId, discId));
-      return next;
-    });
   }
 
   function handleDiscMouseDown(
@@ -824,14 +725,12 @@ export default function RatingsGrid({
     rowEl: HTMLTableRowElement
   ) {
     if (isReadOnly || e.button !== 0) return;
-    // Don't hijack clicks on buttons/inputs/links inside the cell
     if ((e.target as HTMLElement).closest("button, input, a")) return;
 
     const rowRect = rowEl.getBoundingClientRect();
     const container = tableContainerRef.current;
     if (!container) return;
 
-    // Measure all discipline column bounds
     const colBounds: DragState["colBounds"] = [];
     for (const disc of disciplines) {
       const td = rowEl.querySelector<HTMLElement>(`[data-disc-id="${disc.id}"]`);
@@ -857,13 +756,11 @@ export default function RatingsGrid({
     };
   }
 
-  // Attach window-level pointer tracking while a drag is in progress
   useEffect(() => {
     function onMouseMove(e: MouseEvent) {
       const state = dragRef.current;
       if (!state) return;
 
-      // Activate once we've moved ≥8px horizontally
       if (!state.active && Math.abs(e.clientX - state.startX) >= 8) {
         state.active = true;
       }
@@ -871,7 +768,6 @@ export default function RatingsGrid({
 
       const band = yToBand(e.clientY, state.rowTop, state.rowHeight);
 
-      // Collect samples for all columns the pointer currently overlaps
       for (const col of state.colBounds) {
         if (e.clientX >= col.left && e.clientX <= col.right) {
           const existing = state.samples.get(col.discId) ?? [];
@@ -880,7 +776,6 @@ export default function RatingsGrid({
         }
       }
 
-      // Build preview from majority band per visited discipline
       const previewScores = new Map<string, number>();
       for (const [discId, samples] of state.samples.entries()) {
         if (samples.length === 0) continue;
@@ -919,68 +814,71 @@ export default function RatingsGrid({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isReadOnly, disciplines, students]);
 
-  // ── Progress calculation ───────────────────────────────────────────────────
+  return {
+    dragPreview,
+    tableContainerRef,
+    cellRefs,
+    handleDiscMouseDown,
+    handleCellKeyDown,
+    navKey,
+  };
+}
 
-  const fullyRatedStudentIds = new Set<string>();
-  const anyRatedStudentIds = new Set<string>();
-  for (const student of students) {
-    const allRated = disciplines.every((disc) => {
-      const cell = grid.get(cellKey(student.id, disc.id));
-      return cell?.score !== null;
-    });
-    const hasAny = disciplines.some((disc) => {
-      const cell = grid.get(cellKey(student.id, disc.id));
-      return (cell?.score ?? null) !== null;
-    });
-    if (disciplines.length > 0 && allRated) {
-      fullyRatedStudentIds.add(student.id);
-    }
-    if (disciplines.length > 0 && hasAny) {
-      anyRatedStudentIds.add(student.id);
-    }
-  }
+// ── Custom Hook: useRatingsGridGeneration ─────────────────────────────────────
 
-  const fullyRatedCount = fullyRatedStudentIds.size;
-  const anyRatedCount = anyRatedStudentIds.size;
-  const progressPct =
-    students.length > 0 ? Math.round((fullyRatedCount / students.length) * 100) : 0;
+interface RatingsGridGeneration {
+  generatingStudentId: string | null;
+  handleGenerateSingle: (studentId: string) => Promise<void>;
+  bulkBatchId: string | null;
+  bulkError: string | null;
+  bulkDone: boolean;
+  isBulkRunning: boolean;
+  handleBulkGenerate: () => Promise<void>;
+  setBulkDone: React.Dispatch<React.SetStateAction<boolean>>;
+  setBulkBatchId: React.Dispatch<React.SetStateAction<string | null>>;
+}
 
-  // ── Single generate ────────────────────────────────────────────────────────
-
+function useRatingsGridGeneration(
+  sessionId: string,
+  saveAllPending: () => Promise<void>,
+  onReportCreated: (report: GridReport) => void,
+  onBulkBatchStarted: (batchId: string) => void,
+  setSaveError: React.Dispatch<React.SetStateAction<string | null>>
+): RatingsGridGeneration {
   const [generatingStudentId, setGeneratingStudentId] = useState<string | null>(null);
-
-  async function handleGenerateSingle(studentId: string) {
-    setGeneratingStudentId(studentId);
-    try {
-      interface GenerateResponse {
-        report: GridReport;
-      }
-      const result = await apiFetch<GenerateResponse>(
-        `/api/v1/sessions/${sessionId}/students/${studentId}/generate`,
-        { method: "POST", body: {} }
-      );
-      const report = result.report;
-      onReportCreated({
-        id: report.id,
-        student_id: report.student_id ?? (report as unknown as Record<string, string>).studentId,
-        status: report.status,
-        word_count: report.word_count,
-      });
-    } catch (err) {
-      setSaveError(err instanceof APIError ? err.message : "Failed to generate report.");
-    } finally {
-      setGeneratingStudentId(null);
-    }
-  }
-
-  // ── Bulk generate ──────────────────────────────────────────────────────────
-
   const [bulkBatchId, setBulkBatchId] = useState<string | null>(null);
   const [bulkError, setBulkError] = useState<string | null>(null);
   const [bulkDone, setBulkDone] = useState(false);
+  const isBulkRunning = bulkBatchId !== null && !bulkDone;
 
-  async function handleBulkGenerate() {
-    // Save all pending first
+  const handleGenerateSingle = useCallback(
+    async (studentId: string) => {
+      setGeneratingStudentId(studentId);
+      try {
+        interface GenerateResponse {
+          report: GridReport;
+        }
+        const result = await apiFetch<GenerateResponse>(
+          `/api/v1/sessions/${sessionId}/students/${studentId}/generate`,
+          { method: "POST", body: {} }
+        );
+        const report = result.report;
+        onReportCreated({
+          id: report.id,
+          student_id: report.student_id ?? (report as unknown as Record<string, string>).studentId,
+          status: report.status,
+          word_count: report.word_count,
+        });
+      } catch (err) {
+        setSaveError(err instanceof APIError ? err.message : "Failed to generate report.");
+      } finally {
+        setGeneratingStudentId(null);
+      }
+    },
+    [sessionId, onReportCreated, setSaveError]
+  );
+
+  const handleBulkGenerate = useCallback(async () => {
     await saveAllPending();
     setBulkError(null);
     setBulkDone(false);
@@ -998,17 +896,129 @@ export default function RatingsGrid({
     } catch (err) {
       setBulkError(err instanceof APIError ? err.message : "Failed to start bulk generation.");
     }
-  }
+  }, [sessionId, saveAllPending, onBulkBatchStarted]);
 
-  const isBulkRunning = bulkBatchId !== null && !bulkDone;
+  return {
+    generatingStudentId,
+    handleGenerateSingle,
+    bulkBatchId,
+    bulkError,
+    bulkDone,
+    isBulkRunning,
+    handleBulkGenerate,
+    setBulkDone,
+    setBulkBatchId,
+  };
+}
 
-  // ── View mode ──────────────────────────────────────────────────────────────
+// ── Main RatingsGrid ───────────────────────────────────────────────────────────
 
-  type ViewMode = "table" | "sparkline";
-  const [viewMode, setViewMode] = useState<ViewMode>("table");
+export default function RatingsGrid({
+  sessionId,
+  students,
+  disciplines,
+  reports,
+  isReadOnly,
+  onReportCreated,
+  onBulkBatchStarted,
+  topics,
+}: RatingsGridProps) {
+  // 1. Normalize inputs
+  const normalizedStudents = students ?? [];
+  const normalizedDisciplines = disciplines ?? [];
 
-  // ── SparklineGrid accessor callbacks (stable references) ──────────────────
+  // 2. ALL hooks in one contiguous top-level block
 
+  // Grid state (cells, comments, pending saves)
+  const {
+    grid, setGrid,
+    comments, setComments,
+    pendingSave,
+    setPendingSave,
+    pendingComments,
+    setPendingComments,
+    hasUnsaved,
+    pendingCommentsRef,
+  } = useRatingsGridState(sessionId, normalizedStudents, normalizedDisciplines);
+
+  // Save logic (single, bulk, auto-save interval)
+  const {
+    saveError, setSaveError,
+    saveSingleRating,
+    saveAllPending,
+  } = useRatingsGridSave(
+    sessionId,
+    grid,
+    comments,
+    pendingSave,
+    pendingComments,
+    setPendingSave,
+    setPendingComments,
+    normalizedDisciplines
+  );
+
+  // Topic ratings
+  const {
+    topicGrid, setTopicGrid,
+    topicSaveError, setTopicSaveError,
+  } = useRatingsGridTopics(sessionId);
+
+  // Drag-to-grade + keyboard navigation
+  const handleScoreChange = useCallback(
+    (studentId: string, disciplineId: string, score: number) => {
+      if (isReadOnly) return;
+      const key = cellKey(studentId, disciplineId);
+      setGrid((prev) => {
+        const next = new Map(prev);
+        next.set(key, { score, comment: prev.get(key)?.comment ?? null });
+        return next;
+      });
+      setPendingSave((prev) => {
+        const next = new Set(prev);
+        next.add(key);
+        return next;
+      });
+    },
+    [isReadOnly, setGrid, setPendingSave]
+  );
+
+  const {
+    dragPreview,
+    tableContainerRef,
+    cellRefs,
+    handleDiscMouseDown,
+    handleCellKeyDown,
+    navKey,
+  } = useRatingsGridDrag(
+    isReadOnly,
+    normalizedStudents,
+    normalizedDisciplines,
+    handleScoreChange
+  );
+
+  // Report generation
+  const {
+    generatingStudentId,
+    handleGenerateSingle,
+    bulkBatchId,
+    bulkError,
+    bulkDone,
+    isBulkRunning,
+    handleBulkGenerate,
+    setBulkDone,
+    setBulkBatchId,
+  } = useRatingsGridGeneration(
+    sessionId,
+    saveAllPending,
+    onReportCreated,
+    onBulkBatchStarted,
+    setSaveError
+  );
+
+  // View mode
+  const [viewMode, setViewMode] = useState<"table" | "sparkline">("table");
+
+  // SparklineGrid accessor callbacks
   const getScore = useCallback(
     (studentId: string, disciplineId: string): number | null =>
       grid.get(cellKey(studentId, disciplineId))?.score ?? null,
@@ -1026,9 +1036,139 @@ export default function RatingsGrid({
     [topicGrid]
   );
 
-  // ── Render ─────────────────────────────────────────────────────────────────
+  // Comment/topic handlers
+  const handleCommentChange = useCallback(
+    (studentId: string, value: string) => {
+      if (isReadOnly) return;
+      setComments((prev) => new Map(prev).set(studentId, value));
+      setPendingComments((prev) => new Set(prev).add(studentId));
+    },
+    [isReadOnly, setComments, setPendingComments]
+  );
 
-  if (students.length === 0) {
+  const handleTopicScoreChange = useCallback(
+    async (studentId: string, topicName: string, score: number) => {
+      if (isReadOnly) return;
+      const key = `${studentId}|${topicName}`;
+      setTopicGrid((prev) => new Map(prev).set(key, score));
+      setTopicSaveError(null);
+      try {
+        await apiFetch(`/api/v1/sessions/${sessionId}/topic-ratings/bulk`, {
+          method: "POST",
+          body: { ratings: [{ studentId, topicName, score }] },
+        });
+      } catch (err) {
+        setTopicSaveError(err instanceof APIError ? err.message : "Failed to save topic rating.");
+      }
+    },
+    [isReadOnly, sessionId, setTopicGrid, setTopicSaveError]
+  );
+
+  const handleCellBlur = useCallback(
+    (e: FocusEvent<HTMLDivElement>, studentId: string, disciplineId: string) => {
+      const relatedTarget = e.relatedTarget as HTMLElement | null;
+      const currentTarget = e.currentTarget as HTMLElement;
+      if (relatedTarget && currentTarget.contains(relatedTarget)) return;
+
+      const key = cellKey(studentId, disciplineId);
+      if (pendingSave.has(key)) {
+        saveSingleRating(studentId, disciplineId);
+      }
+    },
+    [pendingSave, saveSingleRating]
+  );
+
+  const handleCommentBlur = useCallback(
+    (studentId: string) => {
+      if (!pendingComments.has(studentId)) return;
+      const ratingsToPush: Array<{
+        studentId: string;
+        sessionDisciplineId: string;
+        score: number;
+        comment?: string;
+      }> = [];
+      for (const disc of normalizedDisciplines) {
+        const key = cellKey(studentId, disc.id);
+        const cell = grid.get(key);
+        if (cell?.score !== null && cell !== undefined) {
+          ratingsToPush.push({
+            studentId,
+            sessionDisciplineId: disc.id,
+            score: cell.score as number,
+            comment: comments.get(studentId)?.trim() || undefined,
+          });
+        }
+      }
+      if (ratingsToPush.length === 0) {
+        setPendingComments((prev) => {
+          const next = new Set(prev);
+          next.delete(studentId);
+          return next;
+        });
+        return;
+      }
+      apiFetch(`/api/v1/sessions/${sessionId}/ratings`, {
+        method: "POST",
+        body: { ratings: ratingsToPush },
+      })
+        .then(() => {
+          setPendingComments((prev) => {
+            const next = new Set(prev);
+            next.delete(studentId);
+            return next;
+          });
+        })
+        .catch((err: unknown) => {
+          setSaveError(err instanceof APIError ? err.message : "Auto-save failed.");
+        });
+    },
+    [pendingComments, normalizedDisciplines, grid, comments, sessionId, setPendingComments, setSaveError]
+  );
+
+  // 3. Derived values
+  const fullyRatedStudentIds = new Set<string>();
+  const anyRatedStudentIds = new Set<string>();
+  for (const student of normalizedStudents) {
+    const allRated = normalizedDisciplines.every((disc) => {
+      const cell = grid.get(cellKey(student.id, disc.id));
+      return cell?.score !== null;
+    });
+    const hasAny = normalizedDisciplines.some((disc) => {
+      const cell = grid.get(cellKey(student.id, disc.id));
+      return (cell?.score ?? null) !== null;
+    });
+    if (normalizedDisciplines.length > 0 && allRated) {
+      fullyRatedStudentIds.add(student.id);
+    }
+    if (normalizedDisciplines.length > 0 && hasAny) {
+      anyRatedStudentIds.add(student.id);
+    }
+  }
+
+  const fullyRatedCount = fullyRatedStudentIds.size;
+  const anyRatedCount = anyRatedStudentIds.size;
+  const progressPct =
+    normalizedStudents.length > 0 ? Math.round((fullyRatedCount / normalizedStudents.length) * 100) : 0;
+
+  const isLoading = !normalizedStudents.length && !normalizedDisciplines.length;
+  const isEmptyStudents = normalizedStudents.length === 0;
+  const isEmptyDisciplines = normalizedDisciplines.length === 0;
+
+  // 4. Conditional rendering AFTER all hooks
+  if (isLoading) {
+    return (
+      <div className="bg-white rounded-lg border border-gray-200 p-6 animate-pulse">
+        <div className="h-4 bg-gray-200 rounded w-24 mb-4" />
+        <div className="space-y-2">
+          <div className="h-8 bg-gray-100 rounded" />
+          <div className="h-8 bg-gray-100 rounded" />
+          <div className="h-8 bg-gray-100 rounded" />
+        </div>
+      </div>
+    );
+  }
+
+  if (isEmptyStudents) {
     return (
       <div className="bg-white rounded-lg border border-gray-200 shadow-sm px-6 py-10 text-center">
         <p className="text-sm text-gray-400">No students in this class.</p>
@@ -1036,7 +1176,7 @@ export default function RatingsGrid({
     );
   }
 
-  if (disciplines.length === 0) {
+  if (isEmptyDisciplines) {
     return (
       <div className="bg-white rounded-lg border border-gray-200 shadow-sm px-6 py-10 text-center">
         <p className="text-sm text-gray-400 mb-1">No disciplines configured for this session.</p>
@@ -1045,6 +1185,7 @@ export default function RatingsGrid({
     );
   }
 
+  // 5. Final render
   return (
     <div className="space-y-4">
       {/* Mode switcher */}
@@ -1076,18 +1217,15 @@ export default function RatingsGrid({
       {/* Progress bar + Generate CTA */}
       <div className="bg-white rounded-lg border border-gray-200 shadow-sm px-5 py-3">
         <div className="flex items-center gap-4">
-          {/* Left: label */}
           <span className="flex-none text-xs font-medium text-gray-600 whitespace-nowrap">
-            {fullyRatedCount} / {students.length} students fully rated
+            {fullyRatedCount} / {normalizedStudents.length} students fully rated
           </span>
-          {/* Middle: progress bar */}
           <div className="flex-1 bg-gray-100 rounded-full h-2 overflow-hidden">
             <div
               className="h-2 rounded-full bg-indigo-600 transition-all duration-500"
               style={{ width: `${progressPct}%` }}
             />
           </div>
-          {/* Right: unsaved indicator + Generate CTA */}
           <div className="flex-none flex items-center gap-3">
             {hasUnsaved && (
               <span className="flex items-center gap-1 text-xs text-amber-600 whitespace-nowrap">
@@ -1131,8 +1269,8 @@ export default function RatingsGrid({
       {viewMode === "sparkline" && (
         <div className="bg-white rounded-lg border border-gray-200 shadow-sm overflow-hidden">
           <SparklineGrid
-            students={students}
-            disciplines={disciplines}
+            students={normalizedStudents}
+            disciplines={normalizedDisciplines}
             getScore={getScore}
             onScoreChange={handleScoreChange}
             onScoreCommit={saveSingleRating}
@@ -1165,14 +1303,11 @@ export default function RatingsGrid({
           const state = dragRef.current;
           if (!state) return null;
 
-          // Build points: [x, y] for each visited discipline in order
           const points: Array<[number, number]> = [];
           for (const col of state.colBounds) {
             const score = dragPreview.scores.get(col.discId);
             if (score === undefined) continue;
-            // x: column center, relative to container
             const x = col.centerX - containerRect.left + container.scrollLeft;
-            // y: map score (1–5) to row position — score 5 = near top, score 1 = near bottom
             const rowRelTop = state.rowTop - containerRect.top + container.scrollTop;
             const y = rowRelTop + state.rowHeight * (1 - (score - 1) / 4);
             points.push([x, y]);
@@ -1205,18 +1340,16 @@ export default function RatingsGrid({
         <table className="table-fixed w-full text-sm border-collapse">
           <colgroup>
             <col style={{ width: "180px" }} />
-            {disciplines.map((disc) => (
+            {normalizedDisciplines.map((disc) => (
               <col key={disc.id} style={{ width: "110px" }} />
             ))}
             {topics.map((topicName) => (
               <col key={topicName} style={{ width: "110px" }} />
             ))}
-            {/* Comment column — no explicit width, absorbs remaining space */}
             <col />
             <col style={{ width: "40px" }} />
           </colgroup>
           <thead>
-            {/* Row 1: group labels */}
             <tr className="bg-slate-100 border-b border-gray-200">
               <th
                 rowSpan={2}
@@ -1224,9 +1357,9 @@ export default function RatingsGrid({
               >
                 Student
               </th>
-              {disciplines.length > 0 && (
+              {normalizedDisciplines.length > 0 && (
                 <th
-                  colSpan={disciplines.length}
+                  colSpan={normalizedDisciplines.length}
                   className="px-2 py-1.5 text-center text-xs font-semibold text-slate-500 uppercase tracking-wide border-b border-gray-100"
                 >
                   Disciplines
@@ -1253,9 +1386,8 @@ export default function RatingsGrid({
                 <SparklesIcon className="w-4 h-4 mx-auto text-gray-400" />
               </th>
             </tr>
-            {/* Row 2: individual column names */}
             <tr className="border-b border-gray-200 bg-gray-50">
-              {disciplines.map((disc, di) => (
+              {normalizedDisciplines.map((disc, di) => (
                 <th
                   key={disc.id}
                   className={`px-1 py-2 text-center text-xs font-semibold text-gray-500 uppercase tracking-wide ${di > 0 ? "border-l border-slate-200" : ""} ${di % 2 === 1 ? "bg-slate-50" : ""}`}
@@ -1280,8 +1412,8 @@ export default function RatingsGrid({
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-50">
-            {students.map((student, si) => {
-              const scores = disciplines.map(
+            {normalizedStudents.map((student, si) => {
+              const scores = normalizedDisciplines.map(
                 (disc) => grid.get(cellKey(student.id, disc.id))?.score ?? null
               );
               const avg = avgScore(scores);
@@ -1296,7 +1428,6 @@ export default function RatingsGrid({
                   key={student.id}
                   className={`transition-colors hover:brightness-[0.97] ${rowBg} ${dragPreview?.studentId === student.id ? "select-none" : ""}`}
                 >
-                  {/* Student name */}
                   <td className={`sticky left-0 z-10 px-4 py-2.5 ${rowBg || "bg-white"}`}>
                     <div className="font-medium text-gray-900 text-sm leading-tight">
                       {student.first_name}{student.last_name ? ` ${student.last_name}` : ""}
@@ -1311,14 +1442,12 @@ export default function RatingsGrid({
                     )}
                   </td>
 
-                  {/* Discipline score cells */}
-                  {disciplines.map((disc, di) => {
+                  {normalizedDisciplines.map((disc, di) => {
                     const key = cellKey(student.id, disc.id);
                     const cell = grid.get(key);
                     const score = cell?.score ?? null;
                     const colBg = di % 2 === 1 ? "bg-slate-50/60" : "";
 
-                    // Show drag preview highlight for this cell
                     const previewScore = dragPreview?.studentId === student.id
                       ? dragPreview.scores.get(disc.id)
                       : undefined;
@@ -1349,7 +1478,6 @@ export default function RatingsGrid({
                         >
                           {[1, 2, 3, 4, 5].map((v) => {
                             const active = score === v;
-                            // During drag on this row, dim buttons to let SVG overlay shine
                             const isDragRow = dragPreview?.studentId === student.id;
                             return (
                               <button
@@ -1377,7 +1505,6 @@ export default function RatingsGrid({
                     );
                   })}
 
-                  {/* Topic score cells */}
                   {topics.map((topicName, ti) => {
                     const key = `${student.id}|${topicName}`;
                     const score = topicGrid.get(key) ?? null;
@@ -1416,7 +1543,6 @@ export default function RatingsGrid({
                     );
                   })}
 
-                  {/* Comment — flexible column that expands to fill remaining width */}
                   <td className="px-2 py-2 w-full">
                     <input
                       id={`comment-${student.id}`}
@@ -1430,7 +1556,6 @@ export default function RatingsGrid({
                     />
                   </td>
 
-                  {/* Report status */}
                   <td className="px-3 py-2">
                     <ReportStatusCell
                       report={report}
@@ -1448,7 +1573,6 @@ export default function RatingsGrid({
           </tbody>
         </table>
       </div>
-
 
       {/* Bulk progress toast */}
       {bulkBatchId !== null && (
